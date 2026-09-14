@@ -1,11 +1,14 @@
 # Benchmarks
 
-**Status: accepted.** Correctness and memory pass cleanly; wall-clock time
-is 1.8× over the 5-minute target for the reason documented below (a real
-CPU-core ceiling on the shared 8-vCPU dev VM this ran on, not a software
-defect) and has been accepted as-is rather than chased further on this
-hardware. Re-verify on real deployment hardware before relying on the
-5-minute number specifically.
+**Status: OPEN ITEM — the 5-minute wall-clock target is not met and is not
+being carried as accepted.** Correctness and memory pass cleanly. Wall-clock
+time is 1.8× over the 5-minute target; the root-cause investigation below
+(a real CPU-core ceiling on the shared 8-vCPU dev VM this ran on, not a
+software defect) is real evidence, not an excuse, but it is not a
+substitute for actually meeting the target. This stays open until either
+re-verified under 5 minutes on hardware with more headroom, or the
+5-minute bar is explicitly revised by whoever owns spec §13. Do not treat
+this benchmark as satisfying spec §13 M2's time criterion.
 
 ## 100M-row Postgres ↔ ClickHouse diff (spec §10, §13 M2)
 
@@ -34,7 +37,7 @@ measuring wall-clock time and the **client** process's peak RSS
 |---|---|---|---|
 | Correctness | `missing_in_target=400, extra_in_target=300, changed=300` — exactly the 1,000 introduced differences, nothing else | exact | **PASS** |
 | Peak client memory | 127.5 MB | < 500 MB | **PASS** |
-| Wall-clock time | 536.8s (8.95 min) | < 5 min | **FAIL** — 1.8× over budget |
+| Wall-clock time | 536.8s (8.95 min) | < 5 min | **FAIL — OPEN ITEM** — 1.8× over budget |
 
 Full JSON result:
 ```json
@@ -115,3 +118,18 @@ identical result — same counts, same row-diff keys — to the sequential
 path on a smaller, real Postgres table with deliberately scattered
 differences, so the 8.95-minute number above reflects genuinely correct
 work, not a shortcut that happens to look fast.
+
+## Open items
+
+- **The 5-minute target is not met.** 536.8s vs a 300s budget. Not marked
+  accepted, not marked done. Whoever picks this up next should either:
+  (a) re-run this exact benchmark on hardware with real spare CPU
+  headroom (a dedicated host, not a shared laptop VM) and confirm it
+  lands under 5 minutes there, or (b) pursue a genuine algorithmic
+  reduction in total row-hashing work (none identified so far — see
+  "Why it's still over 5 minutes" above for what was already ruled out:
+  more client threads, disabling Postgres's internal query parallelism),
+  or (c) get spec §13's 5-minute figure explicitly revisited if it turns
+  out not to be achievable on any reasonably modest single-host setup
+  once cross-engine hashing overhead is accounted for. Until one of
+  those happens, this criterion stays **FAIL**, not accepted, not waived.

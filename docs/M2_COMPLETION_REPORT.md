@@ -1,7 +1,6 @@
 # M2 Completion Report — ClickHouse
 
-**Status: done, accepted** (one documented, accepted exception — see below;
-all other issues found during post-acceptance review have been fixed).
+**Status: M2 accepted with conditions** — the 5-minute benchmark target is an OPEN ITEM (see `docs/benchmarks.md`), not accepted or waived. Everything else, including every other post-acceptance review finding, is fixed and verified.
 
 Run against real Postgres 16 + ClickHouse 24.8 (Docker Desktop, this
 machine). Environment: `TABLEDIFF_TEST_CH_DSN=clickhouse://default:clickhouse@127.0.0.1:8123/default`.
@@ -16,7 +15,7 @@ machine). Environment: `TABLEDIFF_TEST_CH_DSN=clickhouse://default:clickhouse@12
 | 4 | ClickHouse `Nullable(String)` NULL vs Postgres NULL → equal | **PASS** | `TestNullableAcrossEngines::test_clickhouse_nullable_string_null_equals_postgres_null` |
 | 5 | 100M-row benchmark — correctness | **PASS** | manual run (see `docs/benchmarks.md`) — exactly the 1,000 introduced differences (400 missing, 300 extra, 300 changed), nothing else |
 | 5 | 100M-row benchmark — memory under 500 MB | **PASS** | manual run — 127.5 MB peak client RSS |
-| 5 | 100M-row benchmark — under 5 minutes | **FAIL** | manual run — 8.95 min (536.8s), 1.8× over budget. Root-caused to a genuine CPU-core ceiling on this shared 8-vCPU dev VM (Postgres already spawns 2 internal parallel workers per query, so 4 client threads become ~12 competing backend processes), not a fixable software inefficiency. Investigated and accepted — full writeup in [`benchmarks.md`](benchmarks.md). |
+| 5 | 100M-row benchmark — under 5 minutes | **FAIL — OPEN ITEM** | manual run — 8.95 min (536.8s), 1.8× over budget. Root-cause investigation (a real CPU-core ceiling on this shared 8-vCPU dev VM) is documented, not an excuse — this criterion is not accepted or waived and stays open until re-verified under 5 minutes on different hardware or the target is explicitly revised. Full writeup in [`benchmarks.md`](benchmarks.md). |
 
 **Also covered** (SPEC §9's M2 milestone description, all real-server tested):
 ClickHouse connector; ClickHouse key segmentation for UInt/String/UUID
