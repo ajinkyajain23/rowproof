@@ -195,6 +195,80 @@ class TestDecimalAcrossEngines:
         assert any(w.rule and w.rule.value == "DEC-1" for w in result.warnings)
 
 
+class TestFloatAcrossEngines:
+    """FLT-1 was never actually exercised cross-engine before -- found
+    (and fixed) three real bugs in ClickHouseConnector._flt1_expr while
+    answering a review question that happened to ask for real generated
+    SQL against a table with a Float64 column: a missing 'e' in the
+    scientific-notation output, toString() silently dropping trailing
+    zeros on the mantissa (same class of bug as _dec1_expr), and the
+    pre-existing exponent formatting both truncating a 3-digit exponent
+    to 2 and crashing outright on any row containing a bare `0` (see that
+    method's own docstring for the full story). This table deliberately
+    includes the exact values that caught each of those three bugs."""
+
+    def test_float_values_match_across_engines_including_edge_cases(self, pg_database, ch_database):
+        from .conftest import exec_sql
+
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, v float8)")
+        exec_sql(
+            pg_database,
+            "INSERT INTO a VALUES "
+            "(1, 3.14159), (2, 0.0), (3, -1.5), (4, 1e308), (5, 5e-300), "
+            "(6, 'NaN'), (7, 'Infinity'), (8, '-Infinity'), (9, 100.0)",
+        )
+
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b (id UInt64, v Float64) ENGINE = Memory")
+        run_query(
+            ch_dsn,
+            f"INSERT INTO `{ch_database}`.b VALUES "
+            "(1, 3.14159), (2, 0.0), (3, -1.5), (4, 1e308), (5, 5e-300), "
+            "(6, nan), (7, inf), (8, -inf), (9, 100.0)",
+        )
+
+        source = PostgresConnector()
+        source.connect(pg_database)
+        target = ClickHouseConnector()
+        target.connect(_ch_dsn_for_database(ch_database))
+
+        result = hashdiff(
+            source, target,
+            TableRef(engine="postgres", database=pg_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert result.is_match, result.row_diffs
+
+    def test_a_genuinely_different_float_is_still_reported_changed(self, pg_database, ch_database):
+        """Guards against a fix that's so permissive it stops reporting
+        real differences -- the flip side of the bugs above."""
+        from .conftest import exec_sql
+
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, v float8)")
+        exec_sql(pg_database, "INSERT INTO a VALUES (1, 3.14159)")
+
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b (id UInt64, v Float64) ENGINE = Memory")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b VALUES (1, 2.71828)")
+
+        source = PostgresConnector()
+        source.connect(pg_database)
+        target = ClickHouseConnector()
+        target.connect(_ch_dsn_for_database(ch_database))
+
+        result = hashdiff(
+            source, target,
+            TableRef(engine="postgres", database=pg_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert not result.is_match
+        assert result.changed == 1
+        rule = result.row_diffs[0].changes["v"][2]
+        assert rule.value == "FLT-1"
+
+
 class TestNullableAcrossEngines:
     def test_clickhouse_nullable_string_null_equals_postgres_null(self, pg_database, ch_database):
         from .conftest import exec_sql

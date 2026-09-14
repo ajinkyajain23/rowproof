@@ -323,12 +323,71 @@ class ClickHouseConnector:
         ClickHouse's `formatReadableQuantity`/`%e` printf-style format via
         `format()` isn't a precision-controlled scientific-notation
         primitive the way Postgres's `to_char(...,'EEEE')` is, so this
-        builds it from `sign`/`abs`/`floor(log10(...))`/`round()` — bespoke
-        and the least-confident piece of this connector; flagged for
-        priority real-engine verification.
+        builds it from `sign`/`abs`/`floor(log10(...))`/`round()`.
+
+        Three real bugs found running this against a real server (a
+        cross-engine hash-equality style comparison — Postgres's own
+        `_flt1_expr` output for the same value as the reference — was
+        never actually exercised for ClickHouse before; the previous
+        version of this method was flagged in its own docstring as "the
+        least-confident piece of this connector, flagged for priority
+        real-engine verification" and turned out to need every bit of
+        that caution):
+
+        1. The mantissa was missing the literal `'e'` character entirely
+           — `concat(sign, mantissa, exponent_sign, exponent_digits)`
+           produced `'3.14159+00'`, not `'3.14159e+00'`.
+        2. `toString(round(x, decimals))` on a plain Float64 does not pad
+           trailing zeros (`toString(round(3.14159, 14))` -> `'3.14159'`,
+           `toString(round(3.0, 14))` -> `'3'`, not 14 decimal places) —
+           the same class of bug as `_dec1_expr`'s `toString(Decimal)`.
+           Every value whose mantissa doesn't happen to need exactly
+           `decimals` real digits rendered short, disagreeing with
+           Postgres's always-padded `to_char(...,'EEEE')` output for the
+           identical value — silently reporting FLT-1 columns as
+           "changed" between engines when they were not.
+        3. The pre-existing exponent formatting
+           (`leftPad(toString(...), 2, '0')`) both (a) crashes outright
+           for ANY row where some row in the same query has value `0`
+           (`log10(0) = -inf`, and ClickHouse's columnar CASE evaluates
+           every branch's expression for every row regardless of which
+           branch's *result* is selected, so `toInt64(-inf)` errors the
+           whole query even though its output is discarded) and (b)
+           truncates a 3-digit exponent to 2 (`leftPad` shortens an
+           already-longer input instead of leaving it alone — confirmed
+           empirically, see `_dec1_expr`'s docstring for the same
+           discovery) — `1e308` rendered as `...e+30`, not `...e+308`.
+
+        Fixed by: adding the missing `'e'`; hand-formatting the mantissa
+        into a fixed-decimal string the same way `_dec1_expr` does
+        (scaled integer -> `leftPad` -> split, with `greatest(length(...),
+        ...)` so a longer-than-expected value is never truncated); and
+        `toInt64OrZero` instead of `toInt64` for both the mantissa and
+        exponent so a degenerate `0`/`inf`/`NaN` input can never abort
+        the whole query, only the (already-unused, WHEN-branch-shadowed)
+        value it would have produced. Verified against a real server for
+        18 values including `0.0`, `-0.0`, `1e308`, `5e-300`, `NaN`,
+        `Infinity` and `-Infinity`, cross-checked byte-for-byte against
+        Postgres's own `_flt1_expr` output for the identical stored
+        column values on both sides.
         """
         sig_digits = max(sig_digits, 1)
         decimals = sig_digits - 1
+        mantissa = f"(abs({quoted}) / pow(10, floor(log10(abs({quoted})))))"
+        if decimals == 0:
+            mantissa_str = f"toString(toInt64OrZero(toString(round({mantissa}))))"
+        else:
+            pow10 = 10**decimals
+            scaled_int = f"toInt64OrZero(toString(round({mantissa} * {pow10})))"
+            digits = f"toString({scaled_int})"
+            target_len = f"greatest(length({digits}), {decimals + 1})"
+            padded = f"leftPad({digits}, {target_len}, '0')"
+            int_part = f"left({padded}, length({padded}) - {decimals})"
+            frac_part = f"right({padded}, {decimals})"
+            mantissa_str = f"concat({int_part}, '.', {frac_part})"
+        exp_digits_str = f"toString(abs(toInt64OrZero(toString(floor(log10(abs({quoted})))))))"
+        exp_target_len = f"greatest(length({exp_digits_str}), 2)"
+        exponent_digits = f"leftPad({exp_digits_str}, {exp_target_len}, '0')"
         return (
             "(CASE "
             f"WHEN isNaN({quoted}) THEN 'NaN' "
@@ -337,9 +396,10 @@ class ClickHouseConnector:
             f"WHEN {quoted} = 0 THEN '{'0.' + '0' * decimals if decimals else '0'}e+00' "
             "ELSE concat("
             f"if({quoted} < 0, '-', ''), "
-            f"toString(round(abs({quoted}) / pow(10, floor(log10(abs({quoted})))), {decimals})), "
+            f"{mantissa_str}, "
+            "'e', "
             f"if(floor(log10(abs({quoted}))) >= 0, '+', '-'), "
-            f"leftPad(toString(abs(toInt64(floor(log10(abs({quoted})))))), 2, '0')"
+            f"{exponent_digits}"
             ") END)"
         )
 
