@@ -1,39 +1,40 @@
-"""ClickHouse wire access — the HTTP interface, via the stdlib only.
+"""ClickHouse wire access, via `clickhouse-connect` — the real spec §3
+driver.
 
-Spec §3 calls for `clickhouse-connect`. This dev environment has no
-network access to install third-party packages (see docs/DEV_ENVIRONMENT.md
-and _pgwire.py's identical note for Postgres), and unlike Postgres there is
-no `clickhouse-client` CLI binary pre-installed to shell out to either — so
-this module is not a "stand-in" the way _pgwire.py's psql-shim is; it's a
-real, complete client for ClickHouse's plain HTTP interface (a documented,
-stable wire format: POST a SQL string, get back a response body in
-whatever FORMAT was requested — no proprietary framing to reimplement).
-`clickhouse-connect` itself talks to the very same HTTP interface under
-the hood. This is the file to swap if a dedicated driver becomes
-installable later; `ClickHouseConnector` in clickhouse.py calls only
-`run_query()` and `check_connection()` below, never urllib directly.
-
-*** VERIFICATION STATUS: UNTESTED AGAINST A LIVE CLICKHOUSE SERVER. ***
-This environment has no reachable ClickHouse instance (no Docker daemon,
-no apt/pip network access to install one, no pre-installed binary — see
-the M2 conversation notes). Every line of SQL this project generates for
-ClickHouse has been reasoned through against documented ClickHouse
-semantics and, where possible, cross-checked against real Postgres output
-(see clickhouse.py's row_hash_expr docstring for the one case that
-actually matters most: the cross-engine hash must produce the identical
-64-bit integer on both engines for the same fixture string). None of it
-has been executed against a real server. Spec §13 M2's acceptance
-criteria are NOT satisfied and M2 is NOT being reported done until that
-real verification happens.
+`ClickHouseConnector` in clickhouse.py calls only `run_query()` and
+`check_connection()` below, never clickhouse_connect directly. This
+module used to be a hand-rolled stdlib `urllib` HTTP client (see git
+history / docs/DEV_ENVIRONMENT.md for why); clickhouse-connect replaces
+that with the real driver, which speaks the same HTTP interface but also
+handles response decoding, per-engine type mapping, and connection re-use
+itself instead of this module doing it by hand.
 """
 
 from __future__ import annotations
 
-import json
-import urllib.error
-import urllib.request
+import logging
 from dataclasses import dataclass
-from urllib.parse import unquote, urlencode, urlsplit
+from urllib.parse import unquote, urlsplit
+
+import clickhouse_connect
+from clickhouse_connect.driver.exceptions import ClickHouseError
+from clickhouse_connect.driver.exceptions import OperationalError as ChOperationalError
+
+# clickhouse-connect logs a warning (not an exception) when a DDL
+# response's X-ClickHouse-Summary header isn't the JSON shape a SELECT
+# response has (e.g. CREATE DATABASE) — harmless (the statement still
+# succeeds), but noisy by default; quiet it to genuine errors only.
+logging.getLogger("clickhouse_connect").setLevel(logging.ERROR)
+
+# ClickHouse's AUTHENTICATION_FAILED error code (see
+# https://github.com/ClickHouse/ClickHouse/blob/master/src/Common/ErrorCodes.cpp).
+# Unlike Postgres, a bad password over ClickHouse's HTTP interface doesn't
+# fail at the transport layer (no OperationalError) — the server answers
+# with an ordinary-looking error response carrying this code, so it has to
+# be recognised by code, not by exception type, to be treated as a
+# connection failure rather than a query failure (spec §10: "Clean error
+# for: bad credentials").
+_AUTH_FAILED_CODE = 516
 
 
 class ConnectionFailedError(Exception):
@@ -57,8 +58,9 @@ class ChDsn:
 
 def parse_ch_dsn(dsn: str) -> ChDsn:
     """Parse `clickhouse://user:pw@host:port/database`. Default port 8123
-    (ClickHouse's plain-HTTP port; 8443 for HTTPS is out of scope for v1,
-    same as Postgres's DSN handling not covering `sslmode`)."""
+    (ClickHouse's plain-HTTP port — what clickhouse-connect itself talks;
+    8443 for HTTPS is out of scope for v1, same as Postgres's DSN handling
+    not covering `sslmode`)."""
     parts = urlsplit(dsn)
     if parts.scheme not in ("clickhouse", "ch"):
         raise ValueError(f"not a clickhouse DSN: {dsn!r}")
@@ -72,47 +74,47 @@ def parse_ch_dsn(dsn: str) -> ChDsn:
     )
 
 
-def _base_url(dsn: ChDsn) -> str:
-    params = {
-        "database": dsn.database,
-        "default_format": "JSONCompact",
-        # Render 64-bit ints as raw JSON numbers, not quoted strings —
-        # ClickHouse's default JSON output quotes Int64/UInt64 to protect
-        # JS float precision, which we don't need and would rather not
-        # have to un-quote by hand (Python's json module has no such
-        # precision limit).
-        "output_format_json_quote_64bit_integers": "0",
-    }
-    return f"http://{dsn.host}:{dsn.port}/?{urlencode(params)}"
+def _reraise_as_tablediff_error(e: Exception, sql: str) -> None:
+    if isinstance(e, ChOperationalError):
+        # A real transport-level failure: refused/unreachable host,
+        # connection reset, DNS failure.
+        raise ConnectionFailedError(str(e)) from e
+    if isinstance(e, ClickHouseError) and getattr(e, "code", None) == _AUTH_FAILED_CODE:
+        raise ConnectionFailedError(str(e)) from e
+    if isinstance(e, ClickHouseError):
+        raise QueryFailedError(str(e), sql) from e
+    raise
 
 
-def run_query(dsn: ChDsn, sql: str) -> list[tuple]:
-    """POST `sql` to ClickHouse's HTTP interface and return rows as
-    tuples. Never mutates `sql` (no FORMAT clause appended) — the exact
-    text a caller built is the exact text sent, matching spec §5's
-    `--verbose`-reproducibility promise; the response FORMAT is chosen via
-    the `default_format` URL param instead, which only takes effect when
-    the query itself has no explicit FORMAT clause.
+def run_query(dsn: ChDsn, sql: str, timeout: float | None = 30.0) -> list[tuple]:
+    """Run `sql` against ClickHouse and return rows as tuples. Never
+    mutates `sql` (no FORMAT clause appended, no query rewriting) — the
+    exact text a caller built is the exact text sent, matching spec §5's
+    `--verbose`-reproducibility promise. One client per call, matching
+    spec §5 ("One connection per side. No connection pooling in v1.").
     """
-    req = urllib.request.Request(
-        _base_url(dsn), data=sql.encode("utf-8"), method="POST"
-    )
-    if dsn.password is not None or dsn.user != "default":
-        req.add_header("X-ClickHouse-User", dsn.user)
-        req.add_header("X-ClickHouse-Key", dsn.password or "")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise QueryFailedError(f"ClickHouse query failed ({e.code}): {detail}", sql) from e
-    except urllib.error.URLError as e:
-        raise ConnectionFailedError(f"cannot reach ClickHouse at {dsn.host}:{dsn.port}: {e.reason}") from e
+        client = clickhouse_connect.get_client(
+            host=dsn.host,
+            port=dsn.port,
+            username=dsn.user,
+            password=dsn.password or "",
+            database=dsn.database,
+            connect_timeout=max(1, int(timeout)) if timeout else 10,
+        )
+    except Exception as e:  # noqa: BLE001 - re-raised as a typed tablediff error below
+        _reraise_as_tablediff_error(e, sql)
+        raise  # pragma: no cover - _reraise_as_tablediff_error always raises
 
-    if not body.strip():
-        return []
-    payload = json.loads(body)
-    return [tuple(row) for row in payload.get("data", [])]
+    try:
+        settings = {"max_execution_time": timeout} if timeout else None
+        result = client.query(sql, settings=settings)
+        return [tuple(row) for row in result.result_rows]
+    except Exception as e:  # noqa: BLE001
+        _reraise_as_tablediff_error(e, sql)
+        raise  # pragma: no cover
+    finally:
+        client.close()
 
 
 def check_connection(dsn: ChDsn) -> None:

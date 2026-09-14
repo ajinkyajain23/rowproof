@@ -1,7 +1,7 @@
 """M0 acceptance criteria (spec §13 M0), verified against a real Postgres
 instance per spec's instruction: "Verify on real databases before calling
-a milestone done." See docs/DEV_ENVIRONMENT.md for why this is a natively
-installed Postgres rather than testcontainers.
+a milestone done." Runs against the Postgres 16 container docker-compose.yml
+starts (see docs/LAPTOP_SETUP.md).
 
 Each test method's docstring/name is the literal acceptance-criterion
 bullet it proves.
@@ -10,6 +10,7 @@ bullet it proves.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 
@@ -483,7 +484,18 @@ class TestSegmentQueriesUsePkIndex:
         assert "Index" in plan_text, plan_text
 
     def test_text_key_segment_query_uses_pk_index_under_default_collation(self, pg_database):
-        exec_sql(pg_database, "CREATE TABLE a (id text PRIMARY KEY, name text)")
+        # Explicit COLLATE "C" (rather than trusting whatever locale the
+        # server happens to default to): this project's own dev sandbox
+        # defaulted to "C.UTF-8", but this project's docker-compose.yml
+        # Postgres 16 image defaults to "en_US.utf8" — a locale-aware
+        # collation _key_expr_for_ordering (core/hashdiff.py) correctly
+        # treats as NOT byte-order-safe, forcing a COLLATE "C" range
+        # predicate that can't use an index built under en_US.utf8 (a real
+        # correctness trade-off, not a bug — see that function's own
+        # docstring). This test is specifically about the "collation IS
+        # byte-order-safe, so the index IS usable" branch, which needs an
+        # explicit "C" collation to be deterministic across environments.
+        exec_sql(pg_database, 'CREATE TABLE a (id text COLLATE "C" PRIMARY KEY, name text)')
         exec_sql(
             pg_database,
             "INSERT INTO a SELECT 'k' || lpad(g::text, 8, '0'), 'row' FROM generate_series(1, 50000) g",
@@ -649,13 +661,23 @@ class TestNetworkDropMidRun:
                 f"(saw {sql_lines_seen} [sql] lines; stderr so far: {''.join(consumed_stderr)!r})"
             )
 
-        stop = subprocess.run(["service", "postgresql", "stop"], capture_output=True, text=True)
+        # This project's dev environment runs Postgres via
+        # docker-compose.yml (docs/LAPTOP_SETUP.md), not a native
+        # `service postgresql` — stop/start the container instead. Both
+        # achieve the same thing this test needs: the connection really
+        # drops out from under a live query, not a mocked exception.
+        project_root = Path(__file__).resolve().parents[2]
+        stop = subprocess.run(
+            ["docker", "compose", "stop", "postgres"], capture_output=True, text=True, cwd=project_root
+        )
         assert stop.returncode == 0, f"could not stop postgres for the test: {stop.stderr}"
 
         try:
             remaining_stdout, remaining_stderr = proc.communicate(timeout=30)
         finally:
-            start = subprocess.run(["service", "postgresql", "start"], capture_output=True, text=True)
+            start = subprocess.run(
+                ["docker", "compose", "start", "postgres"], capture_output=True, text=True, cwd=project_root
+            )
             assert start.returncode == 0, f"could not restart postgres after the test: {start.stderr}"
             _wait_for_postgres_ready()
 

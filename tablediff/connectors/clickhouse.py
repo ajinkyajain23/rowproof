@@ -243,28 +243,61 @@ class ClickHouseConnector:
     def _dec1_expr(quoted: str, p: int) -> str:
         """DEC-1: exactly `p` decimal places, round half-even — mirrors
         PostgresConnector._dec1_expr's explicit floor+even-tie construction
-        rather than trusting ClickHouse round()'s own tie-breaking rule
-        (documented as banker's rounding, but unverified here — see module
-        docstring), so correctness doesn't depend on that detail either
-        way. `toDecimal256(x, 30)` widens to a high-scale exact decimal
-        (a pure rescale, never lossy) before scaling by `intExp10(p)` —
-        deliberately avoiding Float64 anywhere, since Decimal * Float64
-        would silently reintroduce the imprecision numeric arithmetic
-        exists to avoid.
+        rather than trusting ClickHouse round()'s own tie-breaking rule.
+        `toDecimal256(x, 30)` widens to a high-scale exact decimal (a pure
+        rescale, never lossy) before scaling by `intExp10(p)` — deliberately
+        avoiding Float64 anywhere, since Decimal * Float64 would silently
+        reintroduce the imprecision numeric arithmetic exists to avoid.
+
+        Two bugs found running this against a real server (both fixed
+        here, not just reasoned through):
+
+        1. `toString(toDecimal256(x, p))` — the original approach — silently
+           strips trailing zeros (`toString(toDecimal256(12.5, 2))` ->
+           `'12.5'`, not `'12.50'`), unlike Postgres's `to_char('FM...0.00')`
+           which always pads to exactly `p` places. DEC-1's canonical form
+           requires that padding so two values that differ only in
+           reported scale (12.50 vs 12.5000) render identically at their
+           negotiated minimum scale — confirmed empirically, not just
+           inferred from docs. Fixed by hand-formatting the rounded,
+           scaled *integer* into `sign + digits + '.' + digits` instead of
+           ever converting back to a ClickHouse Decimal for `toString()`.
+        2. The even/odd tie-break (`floor_expr % 2 = 0`) computed `%`
+           directly on the still-Decimal256(30) `floor_expr` — ClickHouse's
+           `%` on a high-scale Decimal does not behave like integer modulo
+           (`13.000...0 % 2` came back `0`, i.e. "even", for the genuinely
+           odd integer 13). Fixed by casting to `Int256` with `toInt256()`
+           before ever taking `%` or comparing sign.
         """
         p = max(p, 0)
         wide = f"toDecimal256({quoted}, 30)"
         pow10 = f"intExp10({p})"
         scaled = f"({wide} * {pow10})"
         floor_expr = f"floor({scaled})"
-        banker = (
+        floor_int = f"toInt256({floor_expr})"
+        # Both CASE branches must return the same type (ClickHouse has no
+        # common supertype between Int256 and Decimal(76,30), and errors
+        # rather than picking one) — round()'s branch is cast to Int256
+        # too, not just the even/odd branch.
+        scaled_int = (
             f"(CASE WHEN ({scaled} - {floor_expr}) = 0.5 "
-            f"THEN (CASE WHEN {floor_expr} % 2 = 0 THEN {floor_expr} ELSE {floor_expr} + 1 END) "
-            f"ELSE round({scaled}) END)"
+            f"THEN (CASE WHEN {floor_int} % 2 = 0 THEN {floor_int} ELSE {floor_int} + 1 END) "
+            f"ELSE toInt256(round({scaled})) END)"
         )
-        rounded_value = f"({banker} / {pow10})"
-        decimals = f"toDecimal256({rounded_value}, {p})"
-        return f"toString({decimals})"
+        sign = f"(CASE WHEN {scaled_int} < 0 THEN '-' ELSE '' END)"
+        abs_digits = f"toString(abs({scaled_int}))"
+        if p == 0:
+            return f"concat({sign}, {abs_digits})"
+        # leftPad() TRUNCATES from the right when the input is already
+        # longer than the target length (confirmed empirically — it does
+        # not just leave a too-long input alone), so the target length has
+        # to be at least the input's own length or digits silently vanish
+        # off a value with more than `p+1` integer digits.
+        target_len = f"greatest(length({abs_digits}), {p + 1})"
+        padded = f"leftPad({abs_digits}, {target_len}, '0')"
+        int_part = f"left({padded}, length({padded}) - {p})"
+        frac_part = f"right({padded}, {p})"
+        return f"concat({sign}, {int_part}, '.', {frac_part})"
 
     @staticmethod
     def _flt1_expr(quoted: str, sig_digits: int) -> str:

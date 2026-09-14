@@ -34,10 +34,27 @@ from tablediff.connectors.postgres import PostgresConnector
 from tablediff.core.hashdiff import diff as hashdiff
 from tablediff.core.models import TableRef
 
-CH_ADMIN_DSN_URL = os.environ.get("TABLEDIFF_TEST_CH_DSN", "clickhouse://default:@127.0.0.1:8123/default")
+# Defaults match docker-compose.yml exactly (Postgres 16 on 5432,
+# ClickHouse 24.8 on 8123 with CLICKHOUSE_PASSWORD=clickhouse) — no env
+# vars needed when running against the Docker services this project's
+# docker-compose.yml starts. TABLEDIFF_TEST_CH_DSN / _PG_ADMIN_DSN still
+# override for any other reachable instance.
+CH_ADMIN_DSN_URL = os.environ.get(
+    "TABLEDIFF_TEST_CH_DSN", "clickhouse://default:clickhouse@127.0.0.1:8123/default"
+)
 PG_ADMIN_DSN_URL = os.environ.get(
     "TABLEDIFF_TEST_PG_ADMIN_DSN", "postgres://postgres:postgres@127.0.0.1:5432/postgres"
 )
+
+
+def _ch_dsn_for_database(database: str) -> str:
+    """Build a DSN pointed at a specific database, reusing
+    CH_ADMIN_DSN_URL's own host/port/credentials — never hard-coding them
+    — so a TABLEDIFF_TEST_CH_DSN override is honoured everywhere, not just
+    for the admin connection."""
+    admin = parse_ch_dsn(CH_ADMIN_DSN_URL)
+    auth = admin.user if admin.password is None else f"{admin.user}:{admin.password}"
+    return f"clickhouse://{auth}@{admin.host}:{admin.port}/{database}"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -120,8 +137,18 @@ class TestTs2AcrossEngines:
     def test_timestamptz_vs_datetime_same_second_is_not_reported(self, pg_database, ch_database):
         from .conftest import exec_sql
 
+        # .354321 (not .654321): Postgres's own typmod cast to precision 0
+        # ROUNDS, not truncates (empirically confirmed and deliberately
+        # chosen at M1 — see test_m1_fixtures.py's
+        # test_rounds_half_up_at_lower_precision_not_truncates), so a
+        # fractional value past the .5 boundary would round UP into the
+        # *next* second and genuinely differ from ClickHouse's whole-second
+        # value here — this fixture has to stay under that boundary to
+        # actually exercise "differences within the same second are not
+        # reported" (spec §13 M2) rather than a real, correctly-reported
+        # difference.
         exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, ts timestamptz(6))")
-        exec_sql(pg_database, "INSERT INTO a VALUES (1, '2024-03-01 10:00:00.654321+00')")
+        exec_sql(pg_database, "INSERT INTO a VALUES (1, '2024-03-01 10:00:00.354321+00')")
 
         ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
         run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b (id UInt64, ts DateTime) ENGINE = Memory")
@@ -130,7 +157,7 @@ class TestTs2AcrossEngines:
         source = PostgresConnector()
         source.connect(pg_database)
         target = ClickHouseConnector()
-        target.connect(f"clickhouse://default:@127.0.0.1:8123/{ch_database}")
+        target.connect(_ch_dsn_for_database(ch_database))
 
         result = hashdiff(
             source, target,
@@ -156,7 +183,7 @@ class TestDecimalAcrossEngines:
         source = PostgresConnector()
         source.connect(pg_database)
         target = ClickHouseConnector()
-        target.connect(f"clickhouse://default:@127.0.0.1:8123/{ch_database}")
+        target.connect(_ch_dsn_for_database(ch_database))
 
         result = hashdiff(
             source, target,
@@ -182,7 +209,7 @@ class TestNullableAcrossEngines:
         source = PostgresConnector()
         source.connect(pg_database)
         target = ClickHouseConnector()
-        target.connect(f"clickhouse://default:@127.0.0.1:8123/{ch_database}")
+        target.connect(_ch_dsn_for_database(ch_database))
 
         result = hashdiff(
             source, target,

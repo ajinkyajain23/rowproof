@@ -273,16 +273,16 @@ class TestNullFixtures:
         exec_sql(pg_database, "CREATE TABLE t (id serial PRIMARY KEY, v integer)")
         exec_sql(pg_database, "INSERT INTO t (v) VALUES (NULL), (0)")
         # NULL-1's canonical string ("\N") and INT-1's ("0") are both
-        # genuinely distinct in SQL — the int-vs-str Python type here is
-        # just _pgwire.py's psql-backed _smart_cast stand-in coercing an
-        # unambiguous digit string back to int (see its docstring); a
-        # real driver would do the same. `!=` (not `==`) is the actual
-        # NULL-1 claim being tested — the canonical *strings* SQL computed
-        # for the two rows are different, however Python ends up typing
-        # them locally.
+        # genuinely distinct in SQL. Both come back as plain Python str:
+        # INT-1's normalise_expr wraps the column in `::text` in the SQL
+        # itself (postgres.py), so a real driver (psycopg) hands back the
+        # string "0", not the int 0 — confirmed against a real server;
+        # only the old psql-subprocess stand-in's _smart_cast helper
+        # guessed digit strings back into Python ints, and only because it
+        # had no column-type metadata to know better.
         rows = render(pg_database, "t")
         assert rows[0] == "\\N"
-        assert rows[1] == 0
+        assert rows[1] == "0"
         assert rows[0] != rows[1]
 
 

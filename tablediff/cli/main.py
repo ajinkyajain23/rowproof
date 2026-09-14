@@ -11,6 +11,7 @@ import sys
 from tablediff.cli.render import render_json, render_terminal
 from tablediff.cli.spec import parse_source_spec, resolve_source_spec
 from tablediff.config import load_config
+from tablediff.connectors.clickhouse import ClickHouseConnector
 from tablediff.connectors.postgres import PostgresConnector
 from tablediff.core.errors import TableDiffError
 from tablediff.core.hashdiff import diff as run_hashdiff
@@ -24,7 +25,8 @@ EXIT_COULD_NOT_COMPARE = 2
 _CONNECTOR_FACTORIES = {
     "postgres": PostgresConnector,
     "postgresql": PostgresConnector,
-    # "clickhouse": ...   -- M2
+    "clickhouse": ClickHouseConnector,
+    "ch": ClickHouseConnector,
     # "snowflake": ...    -- M3
 }
 
@@ -32,7 +34,7 @@ _CONNECTOR_FACTORIES = {
 def _make_connector(engine: str, verbose: bool):
     factory = _CONNECTOR_FACTORIES.get(engine)
     if factory is None:
-        supported = ", ".join(sorted(set(_CONNECTOR_FACTORIES) - {"postgresql"}))
+        supported = ", ".join(sorted(set(_CONNECTOR_FACTORIES) - {"postgresql", "ch"}))
         raise TableDiffError(f"unsupported engine '{engine}' (supported: {supported})")
     connector = factory()
     if verbose and hasattr(connector, "on_query"):

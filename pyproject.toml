@@ -6,35 +6,21 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 
-# NOTE ON DEPENDENCIES — read this before "fixing" it.
-#
-# The spec (§3) calls for typer, rich, psycopg (v3), clickhouse-connect,
-# snowflake-connector-python and pyyaml. This project was started inside a
-# sandboxed dev environment with NO general internet egress (PyPI, npm and
-# apt mirrors beyond what the base image already had were all blocked by
-# org policy) — see docs/DEV_ENVIRONMENT.md for the full story. Every
-# dependency below marked "stand-in" is a deliberate, isolated substitute
-# behind the exact same interface the spec calls for, so swapping in the
-# real package later is a one-file change with no ripple into core/.
-#
-# Real deps to restore once this runs somewhere with normal network access:
-#   - psycopg[binary]>=3.1   (replaces tablediff.connectors._pgwire, which
-#     shells out to the `psql` CLI binary instead of speaking the wire
-#     protocol directly)
-#   - typer>=0.12             (replaces the argparse-based tablediff.cli.main)
-#   - rich>=13                (replaces the plain-text tablediff.cli.render)
 dependencies = [
     "pyyaml>=6.0",
     "jinja2>=3.1",
+    "typer>=0.12",
+    "rich>=13",
+    "psycopg[binary]>=3.1",
+    "clickhouse-connect>=0.7",
 ]
 
 [project.optional-dependencies]
-postgres = []          # psycopg[binary]>=3.1 once network access exists
-clickhouse = []         # clickhouse-connect  (M2)
 snowflake = []          # snowflake-connector-python  (M3)
 dev = [
     "pytest>=7.0",
     "ruff>=0.4",
+    "testcontainers>=4.0",
 ]
 
 [project.scripts]

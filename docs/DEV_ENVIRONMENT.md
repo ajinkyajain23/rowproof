@@ -1,72 +1,34 @@
 # Dev environment note (read this once)
 
-M0 was built inside a sandboxed cloud dev environment with **no general
-internet egress** — PyPI, npm and most apt mirrors were blocked by org
-network policy (only Anthropic-internal hosts were reachable; the sandbox's
-own base image already had Postgres 16 and a handful of CLI tools
-pre-installed, and that's what M0 was built against).
+M0/M1/early M2 were built inside a sandboxed cloud dev environment with
+**no general internet egress** — PyPI, npm and most apt mirrors were
+blocked by org network policy, and there was no reachable ClickHouse at
+any layer (no Docker daemon, no pre-installed binary). That ruled out
+`pip install psycopg clickhouse-connect typer rich testcontainers` and
+running anything against a real ClickHouse. Four narrowly-scoped
+stand-ins were used instead, each sitting behind the exact interface the
+real dependency would occupy — see git history before this note's last
+edit for the full original stand-in table.
 
-That ruled out `pip install psycopg typer rich testcontainers` — none of
-the spec's chosen stack (§3) could be installed. Rather than block on
-network access, M0 was built with three narrowly-scoped stand-ins, each
-sitting behind the exact interface the real dependency would occupy:
+**Status as of this machine (Docker Desktop + real network access):**
 
-| Spec choice | Stand-in used | Where |
-|---|---|---|
-| `psycopg` (v3, wire protocol) | shells out to the `psql` CLI binary, parses `-A -t` output | `tablediff/connectors/_pgwire.py` |
-| `typer` | `argparse` | `tablediff/cli/main.py` |
-| `rich` | plain `str.format` tables | `tablediff/cli/render.py` |
-| `testcontainers` (Docker-based Postgres for tests) | a real, natively-installed local Postgres 16, started once per test session | `tests/integration/conftest.py` |
-| `clickhouse-connect` (M2) | a real stdlib `urllib` client for ClickHouse's plain HTTP interface — not a shim behind a CLI binary like `_pgwire.py` (no `clickhouse-client` was available to shell out to), but still **never executed against a real ClickHouse server** — this sandbox never had a reachable one at all (no Docker daemon, no apt/pip network access, no pre-installed binary; the linked device bridge was separately broken by an unrelated bug). See `tablediff_status_report.md` for exactly what is and isn't verified. | `tablediff/connectors/_chwire.py` |
+| Spec choice | Status |
+|---|---|
+| `psycopg` (v3) for Postgres | **Done.** `tablediff/connectors/_pgwire.py` talks real wire-protocol Postgres; the old `psql`-subprocess stand-in is gone. |
+| `clickhouse-connect` for ClickHouse | **Done.** `tablediff/connectors/_chwire.py` talks the real driver; the old stdlib-`urllib` client is gone. `tests/integration/test_clickhouse_real.py` runs for real (no longer skipped) against the ClickHouse container `docker-compose.yml` starts — see docs/LAPTOP_SETUP.md. |
+| `typer` for `cli/main.py` | **Not done.** Still `argparse` — out of scope for the M2 connector work; CLI *behavior* (flags, exit codes, output) already matches spec §7 exactly, so this remains a pure rendering-layer swap whenever it's picked up. |
+| `rich` for `cli/render.py` | **Not done.** Still plain `str.format` tables, same reasoning as above. |
+| `testcontainers` for integration tests | **Not literally adopted** — `tests/integration/conftest.py` and `tests/integration/test_clickhouse_real.py` instead point directly at the Postgres/ClickHouse containers `docker-compose.yml` starts, via env vars with defaults matching that file (`TABLEDIFF_TEST_PG_ADMIN_DSN`, `TABLEDIFF_TEST_CH_DSN`). Same underlying goal (a real, disposable database per test run) reached a different way; revisit only if CI needs to spin databases up itself. |
 
-**Postgres's stand-in was low-risk** — `_pgwire.py` talks to a real,
-natively-installed local Postgres, so every Postgres-side test in this
-project has always run against the real engine; only the *transport*
-(subprocess vs. wire protocol) was substituted. **ClickHouse's stand-in is
-different in kind, not just degree**: there was never a real ClickHouse to
-run anything against, at any layer. `tests/integration/test_clickhouse_real.py`
-exists and is written correctly, but every one of its tests is currently
-*skipped*, not passing — see `docs/LAPTOP_SETUP.md` for closing that gap.
+Both connectors' public methods (`connect`, `query`, `get_schema`,
+`get_primary_key`, `normalise_expr`, `row_hash_expr`, `aggregate_hash_expr`,
+`quote_identifier`, `quote_literal`) kept their exact shape through the
+swap — `core/` has zero database imports either way (spec rule 0.4), and
+nothing about the algorithm or SQL generated changed because of it.
 
-**Rule from M2 onward: real drivers only, no new stand-ins.** Two engines'
-worth of substitutes is where subtle, engine-specific bugs start hiding
-behind tests that only prove a Python function returns a plausible-looking
-string. Postgres's transport-only stand-in stays (it's real-engine-backed
-and already scheduled for removal per the swap-out list below); nothing
-past M2 should follow ClickHouse's shape of "reasoned through, never run."
-
-None of this touched `core/` — it has zero database imports either way, per
-spec rule 0.4. The `Connector` protocol (§5) is implemented exactly as
-specified; `PostgresConnector` happens to talk to the database via
-subprocess instead of a socket library, but every method has the same
-signature and the same contract, and it's covered by the same integration
-tests any wire-protocol driver would need to pass.
-
-**Before the v1.1 milestones / launch**, once this runs somewhere with
-normal network access (your laptop, CI, a real Docker host):
-
-1. `pip install psycopg[binary]` and replace `_pgwire.py`'s subprocess calls
-   in `PostgresConnector` with real `psycopg` calls. The connector's public
-   methods (`connect`, `query`, `get_schema`, `get_primary_key`,
-   `normalise_expr`, `row_hash_expr`, `aggregate_hash_expr`,
-   `quote_identifier`, `quote_literal`) don't need to change shape.
-2. `pip install typer rich` and port `cli/main.py` / `cli/render.py`. The
-   CLI's *behavior* (flags, exit codes, output content) was written to match
-   §7–§8 of the spec exactly, so this is a rendering-layer swap, not a
-   redesign.
-3. Add `testcontainers[postgres]` and point `tests/integration/conftest.py`
-   at a container instead of (or in addition to) a local instance — the
-   fixture already isolates "how do I get a Postgres to point at" from the
-   tests themselves, so this is a fixture-only change.
-4. `pip install clickhouse-connect` and replace `_chwire.py`'s calls in
-   `tablediff/connectors/clickhouse.py` with the real client — same
-   contract, same method signatures. Critically, this is also the point
-   where `tests/integration/test_clickhouse_real.py` finally runs for
-   real instead of skipping; treat every failure it produces as a genuine
-   bug report, not noise (see this file's ClickHouse row above for why
-   confidence there is low).
-5. Delete this file's stand-in table once all four are gone.
-
-Nothing about the algorithm, the SQL generated, or the test coverage is
-weaker because of this — it only affects *how Python talks to Postgres* and
-*how the CLI parses flags / prints text*.
+Two real bugs only surfaced once ClickHouse's SQL actually ran against a
+server (both fixed, see `tablediff/connectors/clickhouse.py`'s
+`_dec1_expr` docstring for detail): `toString(Decimal)` silently strips
+trailing zeros, and `%` on a wide `Decimal256` doesn't behave like integer
+modulo. Exactly the class of bug the "no new stand-ins past M2" rule
+exists to catch early instead of shipping.
