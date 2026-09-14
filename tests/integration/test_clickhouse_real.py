@@ -32,6 +32,7 @@ from tablediff.connectors._chwire import ConnectionFailedError, check_connection
 from tablediff.connectors.clickhouse import ClickHouseConnector
 from tablediff.connectors.postgres import PostgresConnector
 from tablediff.core.hashdiff import diff as hashdiff
+from tablediff.core.joindiff import diff as joindiff
 from tablediff.core.models import TableRef
 
 # Defaults match docker-compose.yml exactly (Postgres 16 on 5432,
@@ -482,3 +483,124 @@ class TestCliSupportsClickHouse:
 
         assert code == 0, captured.err
         assert "MATCH" in captured.out
+
+
+class TestJoindiffAgainstRealClickHouse:
+    """joindiff (spec §4.2: same engine, same database — auto-selected by
+    the CLI whenever both sides resolve to the same connection) had never
+    been run against ClickHouse before a review question happened to
+    trigger it by pointing two ClickHouse tables in the same database at
+    each other. Three real, previously-undiscovered bugs, all confirmed
+    against a real server and fixed in core/joindiff.py:
+
+    1. `IS DISTINCT FROM` doesn't exist in ClickHouse at all — its
+       `IS NOT DISTINCT FROM` / `<=>` equivalent is restricted to `JOIN
+       ON` clauses only ("Function isNotDistinctFrom can be used only in
+       the JOIN ON section"). Fixed with a hand-built, portable NULL-safe
+       distinct expression (`_distinct_expr`) that needs no ClickHouse
+       branch at all.
+    2. `COUNT(*) FILTER (WHERE ...)`, used three times over a WHERE
+       clause built from several OR'd sub-conditions (exactly this
+       query's shape), hits a real ClickHouse parser bug ("Aggregate
+       function COUNT requires zero or one argument") even though every
+       piece works in isolation. Fixed with portable
+       `COALESCE(SUM(CASE WHEN ... THEN 1 ELSE 0 END), 0)`.
+    3. The most serious: ClickHouse's `FULL OUTER JOIN` fills a
+       non-Nullable key column's unmatched side with the type's default
+       value (`0` for UInt64), not SQL NULL — so `s.id IS NULL`/
+       `t.id IS NULL` (missing-in-target/extra-in-target detection
+       itself) never fired at all for a genuinely unmatched row with a
+       typical non-Nullable primary key. Fixed by wrapping the key in
+       `toNullable()` inside each side's subquery (a documented no-op
+       for an already-Nullable key).
+    """
+
+    def test_missing_extra_and_changed_detected_correctly(self, ch_database):
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        ddl = "id UInt64, name Nullable(String), amount Decimal(10,2)"
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.a ({ddl}) ENGINE = MergeTree ORDER BY id")
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b ({ddl}) ENGINE = MergeTree ORDER BY id")
+        run_query(
+            ch_dsn,
+            f"INSERT INTO `{ch_database}`.a VALUES "
+            "(1, 'alice', 10.00), (2, NULL, 20.00), (3, 'carol', 30.00), (4, 'dave', 40.00)",
+        )
+        run_query(
+            ch_dsn,
+            f"INSERT INTO `{ch_database}`.b VALUES "
+            "(1, 'alice', 10.00), (2, 'bob', 20.00), (3, NULL, 30.00), (5, 'eve', 50.00)",
+        )
+        # id=4 only in a (missing in target), id=5 only in b (extra in
+        # target), id=2 NULL->'bob' and id=3 'carol'->NULL (both a NULL
+        # transition, on opposite sides -- exactly what bug #3's
+        # toNullable() fix and bug #1's NULL-safe distinct expr both need
+        # to get right at once).
+
+        source = ClickHouseConnector()
+        source.connect(_ch_dsn_for_database(ch_database))
+        target = ClickHouseConnector()
+        target.connect(_ch_dsn_for_database(ch_database))
+
+        result = joindiff(
+            source, target,
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert result.missing_in_target == 1
+        assert result.extra_in_target == 1
+        assert result.changed == 2
+        kinds_by_key = {rd.key: rd.kind for rd in result.row_diffs}
+        assert kinds_by_key == {(4,): "missing", (5,): "extra", (2,): "changed", (3,): "changed"}
+
+    def test_identical_tables_match(self, ch_database):
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        ddl = "id UInt64, name Nullable(String), amount Decimal(10,2)"
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.a ({ddl}) ENGINE = MergeTree ORDER BY id")
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b ({ddl}) ENGINE = MergeTree ORDER BY id")
+        run_query(
+            ch_dsn,
+            f"INSERT INTO `{ch_database}`.a VALUES (1, 'alice', 10.00), (2, NULL, 20.00)",
+        )
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b SELECT * FROM `{ch_database}`.a")
+
+        source = ClickHouseConnector()
+        source.connect(_ch_dsn_for_database(ch_database))
+        target = ClickHouseConnector()
+        target.connect(_ch_dsn_for_database(ch_database))
+
+        result = joindiff(
+            source, target,
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert result.is_match, result.row_diffs
+        assert result.missing_in_target == 0
+        assert result.extra_in_target == 0
+        assert result.changed == 0
+
+    def test_cli_auto_selects_joindiff_for_same_connection_and_succeeds(self, ch_database, capsys):
+        """End to end through the real CLI, which is what actually
+        triggered all three bugs above: pointing two same-database
+        ClickHouse tables at each other auto-selects joindiff (spec
+        §4.2), not hashdiff."""
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.a (id UInt64, name String) ENGINE = MergeTree ORDER BY id")
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b (id UInt64, name String) ENGINE = MergeTree ORDER BY id")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.a VALUES (1, 'x')")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b VALUES (1, 'y')")
+
+        admin = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        auth = admin.user if admin.password is None else f"{admin.user}:{admin.password}"
+        base = f"clickhouse://{auth}@{admin.host}:{admin.port}/{ch_database}"
+
+        from tablediff.cli.main import main as cli_main
+
+        argv = ["diff", f"{base}/a", f"{base}/b", "--key", "id"]
+        code = cli_main(argv)
+        captured = capsys.readouterr()
+
+        assert code == 1, captured.err
+        assert "joindiff" in captured.out
+        assert "DIFFERENT" in captured.out

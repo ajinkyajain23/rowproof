@@ -33,6 +33,26 @@ from tablediff.core.models import (
 )
 
 
+def _distinct_expr(s: str, t: str) -> str:
+    """NULL-safe "these two differ" — standard SQL's `IS DISTINCT FROM`,
+    hand-built instead of using that keyword directly, because it isn't
+    portable: ClickHouse has no `IS DISTINCT FROM` at all (confirmed
+    against a real server — `x IS NOT DISTINCT FROM y` parses only as its
+    `<=>` operator, and that operator is rejected everywhere except a
+    `JOIN ON` clause: "Function isNotDistinctFrom can be used only in the
+    JOIN ON section"), while Postgres has had `IS DISTINCT FROM` since
+    v8.
+
+    True when exactly one side is NULL, or both are non-NULL and unequal
+    — the same truth table as `IS DISTINCT FROM`, verified row-for-row
+    against real Postgres's own `IS DISTINCT FROM` for (equal, unequal,
+    both-NULL, NULL-vs-value in each direction). Plain SQL only (`IS
+    NULL`, `AND`, `OR`, `!=`), so it works identically on both engines
+    without any `connector.engine` branch.
+    """
+    return f"(({s} IS NULL) != ({t} IS NULL)) OR ({s} IS NOT NULL AND {t} IS NOT NULL AND {s} != {t})"
+
+
 def _side_subquery_sql(plan: _Plan, alias: str) -> str:
     """One side's rows, pre-normalised inside its own subquery scope —
     critical so normalise_expr's bare `quote_identifier(column.name)`
@@ -41,7 +61,23 @@ def _side_subquery_sql(plan: _Plan, alias: str) -> str:
     have a same-named column; inside here only one table is visible)."""
     connector = plan.connector
     quote = connector.quote_identifier
-    key_select = [quote(k) for k in plan.key_columns]
+    if connector.engine == "clickhouse":
+        # ClickHouse's FULL OUTER JOIN fills a non-Nullable key column's
+        # unmatched side with the type's default value (0 for UInt64),
+        # not SQL NULL — confirmed against a real server: `s.id IS NULL`/
+        # `t.id IS NULL` (missing-in-target/extra-in-target detection,
+        # `_JoinShape`'s whole `where_clause`, and `_join_sql`'s row
+        # classification) silently never fired for a genuinely
+        # unmatched row with a typical non-Nullable UInt64/Int64 primary
+        # key. Wrapping the key in `toNullable()` forces a real NULL for
+        # the unmatched side; it's a documented no-op for an
+        # already-Nullable key, so this is always safe to apply. Postgres
+        # needs no equivalent — its OUTER JOIN already produces genuine
+        # NULL for an unmatched row regardless of the column's NOT NULL
+        # constraint (a constraint on stored rows, not on join results).
+        key_select = [f"toNullable({quote(k)}) AS {quote(k)}" for k in plan.key_columns]
+    else:
+        key_select = [quote(k) for k in plan.key_columns]
     value_select = [
         f"{connector.normalise_expr(plan.columns_by_name[c], plan.rule_for(c), plan.options)} AS {quote(c)}"
         for c in plan.value_columns
@@ -73,7 +109,7 @@ class _JoinShape:
         self.join_cond = " AND ".join(f"s.{quote(k)} = t.{quote(k)}" for k in key_cols)
         self.key_exprs = [f"COALESCE(s.{quote(k)}, t.{quote(k)})" for k in key_cols]
 
-        diff_conds = " OR ".join(f"s.{quote(c)} IS DISTINCT FROM t.{quote(c)}" for c in self.value_cols)
+        diff_conds = " OR ".join(_distinct_expr(f"s.{quote(c)}", f"t.{quote(c)}") for c in self.value_cols)
         where_parts = [f"s.{self.first_key} IS NULL", f"t.{self.first_key} IS NULL"]
         if diff_conds:
             where_parts.append(f"({diff_conds})")
@@ -117,12 +153,29 @@ def _diff_counts_sql(shape: _JoinShape) -> str:
     bounded with `LIMIT` (spec §4.1 step 6's "counts stay exact; row
     lists don't" applies just as much to joindiff) without losing the
     exact totals to that same limit.
+
+    `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` instead of the SQL-standard
+    `COUNT(*) FILTER (WHERE ...)`: ClickHouse supports `FILTER` on its
+    own, but three of them together over a WHERE clause built from
+    several OR'd sub-conditions (exactly this query's shape) hits a real
+    ClickHouse parser bug — confirmed against a real server, "Aggregate
+    function COUNT requires zero or one argument" — even though every
+    individual piece (multiple `FILTER`s alone, or the full WHERE clause
+    alone) works in isolation. `SUM(CASE WHEN ...)` sidesteps it
+    entirely and is portable standard SQL. `COALESCE(..., 0)`: SUM over
+    zero matching rows is NULL on Postgres (standard SQL) but 0 on
+    ClickHouse (confirmed, non-standard) — the COALESCE is a real fix on
+    Postgres and a harmless no-op on ClickHouse, so both engines return
+    a plain 0 for "no rows of this kind," never NULL.
     """
+    def count_where(condition: str) -> str:
+        return f"COALESCE(SUM(CASE WHEN {condition} THEN 1 ELSE 0 END), 0)"
+
     return (
         f"SELECT "
-        f"COUNT(*) FILTER (WHERE t.{shape.first_key} IS NULL), "
-        f"COUNT(*) FILTER (WHERE s.{shape.first_key} IS NULL), "
-        f"COUNT(*) FILTER (WHERE s.{shape.first_key} IS NOT NULL AND t.{shape.first_key} IS NOT NULL) "
+        f"{count_where(f't.{shape.first_key} IS NULL')}, "
+        f"{count_where(f's.{shape.first_key} IS NULL')}, "
+        f"{count_where(f's.{shape.first_key} IS NOT NULL AND t.{shape.first_key} IS NOT NULL')} "
         f"FROM {shape.from_clause} WHERE {shape.where_clause}"
     )
 
