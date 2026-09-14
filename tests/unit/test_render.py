@@ -62,3 +62,45 @@ def test_real_backslash_n_in_the_middle_of_a_value_is_not_mangled():
     text = render_terminal(result)
     assert repr("a\\Nb") in text
     assert "NULL" not in text
+
+
+def test_terminal_shows_sampled_notice_with_percentage_when_sample_pct_set():
+    result = DiffResult(
+        source=TableRef(engine="postgres", database="db", table="a"),
+        target=TableRef(engine="postgres", database="db", table="b"),
+        key_columns=("id",),
+        algorithm=Algorithm.HASHDIFF,
+        source_count=50,
+        target_count=50,
+        sample_pct=5.0,
+    )
+    text = render_terminal(result)
+    assert "SAMPLED" in text
+    assert "5%" in text
+
+
+def test_terminal_omits_sampled_notice_when_sample_pct_is_none():
+    result = DiffResult(
+        source=TableRef(engine="postgres", database="db", table="a"),
+        target=TableRef(engine="postgres", database="db", table="b"),
+        key_columns=("id",),
+        algorithm=Algorithm.HASHDIFF,
+        source_count=50,
+        target_count=50,
+    )
+    text = render_terminal(result)
+    assert "SAMPLED" not in text
+
+
+def test_json_carries_sample_pct_field():
+    result = DiffResult(
+        source=TableRef(engine="postgres", database="db", table="a"),
+        target=TableRef(engine="postgres", database="db", table="b"),
+        key_columns=("id",),
+        algorithm=Algorithm.HASHDIFF,
+        source_count=50,
+        target_count=50,
+        sample_pct=2.5,
+    )
+    payload = render_json(result)
+    assert '"sample_pct": 2.5' in payload

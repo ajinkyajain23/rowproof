@@ -320,3 +320,68 @@ class TestWhereFiltering:
         result = diff(src2, tgt2, ref2, ref2, key_columns=["id"], where="status = 'active'")
         assert result.is_match
         assert result.source_count == 2
+
+
+class TestSampling:
+    """spec §4.3: "--sample 1% (or --sample-rows N) ... apply the same
+    sampling predicate to both sides (deterministic, based on
+    hash(pk) % 100 < 1 so both sides pick the *same* rows), then run
+    hashdiff on the sample. Report results as 'of the sampled rows' with
+    the sample size stated. Never silently sample."
+    """
+
+    def test_no_sample_requested_leaves_sample_pct_none(self):
+        rows = base_rows(50)
+        src, tgt, ref = make_pair(rows, list(rows), INT_COLS)
+        result = diff(src, tgt, ref, ref, key_columns=["id"])
+        assert result.sample_pct is None
+        assert result.source_count == 50
+
+    def test_sample_pct_narrows_scope_and_still_matches_identical_tables(self):
+        rows = base_rows(2000)
+        src, tgt, ref = make_pair(rows, list(rows), INT_COLS)
+        result = diff(src, tgt, ref, ref, key_columns=["id"], sample=10.0)
+        assert result.is_match, result.row_diffs
+        assert result.sample_pct == 10.0
+        # Not exactly 200 (hash-bucket sampling isn't a perfect draw), but
+        # meaningfully narrower than the full 2000-row table -- proves
+        # sampling actually reduced scope rather than being silently
+        # ignored (spec's own "never silently sample").
+        assert 50 < result.source_count < 500
+        assert result.source_count == result.target_count
+
+    def test_sample_is_deterministic_across_separate_runs(self):
+        rows = base_rows(2000)
+        src1, tgt1, ref1 = make_pair(rows, list(rows), INT_COLS)
+        result1 = diff(src1, tgt1, ref1, ref1, key_columns=["id"], sample=10.0)
+
+        src2, tgt2, ref2 = make_pair(rows, list(rows), INT_COLS)
+        result2 = diff(src2, tgt2, ref2, ref2, key_columns=["id"], sample=10.0)
+
+        # Same data, same sample percentage, run twice -- a real hash-based
+        # predicate picks the exact same rows every time; a naive
+        # RANDOM()-based one would not.
+        assert result1.source_count == result2.source_count
+
+    def test_sample_rows_converts_to_an_equivalent_percentage(self):
+        rows = base_rows(2000)
+        src, tgt, ref = make_pair(rows, list(rows), INT_COLS)
+        result = diff(src, tgt, ref, ref, key_columns=["id"], sample_rows=200)
+        assert result.sample_pct is not None
+        assert 0 < result.sample_pct <= 100
+        assert 0 < result.source_count < 2000
+
+    def test_sample_still_reports_a_real_difference_within_the_sample(self):
+        """A sampled diff must not silently swallow genuine differences
+        that happen to land inside the sampled subset -- narrowing scope
+        is about *which rows get examined*, never about weakening what
+        gets reported for the rows that are."""
+        rows_a = base_rows(3000)
+        rows_b = [dict(r) for r in rows_a]
+        for r in rows_b:
+            r["name"] = r["name"] + "-CHANGED"
+        src, tgt, ref = make_pair(rows_a, rows_b, INT_COLS)
+        result = diff(src, tgt, ref, ref, key_columns=["id"], sample=20.0)
+        assert not result.is_match
+        assert result.changed > 0
+        assert result.changed == result.source_count

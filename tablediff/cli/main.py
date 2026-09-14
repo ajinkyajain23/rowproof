@@ -42,6 +42,19 @@ def _make_connector(engine: str, verbose: bool):
     return connector
 
 
+def _parse_sample_pct(value: str) -> float:
+    """spec §7: `--sample 1%` (the `%` is optional -- `--sample 1` means
+    the same thing)."""
+    text = value.strip().rstrip("%").strip()
+    try:
+        pct = float(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"--sample expects a percentage like '1%%', got {value!r}") from e
+    if not (0 < pct <= 100):
+        raise argparse.ArgumentTypeError(f"--sample must be between 0 and 100, got {value!r}")
+    return pct
+
+
 def _split_cols(value: str | None) -> list[str] | None:
     if not value:
         return None
@@ -140,8 +153,25 @@ def cmd_diff(args) -> int:
         columns = _split_cols(args.columns)
         exclude = _split_cols(args.exclude)
         algorithm = resolve_algorithm(args.algorithm, args)
+        sample = getattr(args, "sample", None)
+        sample_rows = getattr(args, "sample_rows", None)
 
         if algorithm == "joindiff":
+            if sample is not None or sample_rows is not None:
+                # spec §4.3: "apply the same sampling predicate to both
+                # sides ... then run hashdiff on the sample" -- sampling
+                # is defined in terms of hashdiff's segmented approach,
+                # not joindiff's single exact query; --algorithm auto
+                # would have picked hashdiff already for two different
+                # connections, so this only fires when the user forced
+                # joindiff (or both sides really are the same connection)
+                # while also asking to sample -- a clear error beats
+                # silently ignoring the flag.
+                raise TableDiffError(
+                    "--sample/--sample-rows requires hashdiff (spec §4.3) -- "
+                    "pass --algorithm hashdiff, or diff two different connections "
+                    "so hashdiff is auto-selected"
+                )
             result = run_joindiff(
                 source, target, source_ref, target_ref,
                 key_columns=key_columns, columns=columns, exclude=exclude,
@@ -166,6 +196,8 @@ def cmd_diff(args) -> int:
                 threads=args.threads,
                 source_pool=source_pool,
                 target_pool=target_pool,
+                sample=sample,
+                sample_rows=sample_rows,
                 **_normalise_kwargs(args),
             )
 
@@ -389,6 +421,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     diff_p.add_argument("--row-threshold", type=int, default=1000)
     diff_p.add_argument("--max-diff-rows", type=int, default=10_000)
+    sample_group = diff_p.add_mutually_exclusive_group()
+    sample_group.add_argument(
+        "--sample", type=_parse_sample_pct, metavar="PCT",
+        help="diff a deterministic sample of rows, e.g. --sample 1%% (spec §4.3)",
+    )
+    sample_group.add_argument(
+        "--sample-rows", type=int, metavar="N",
+        help="diff a deterministic sample of approximately N rows",
+    )
     diff_p.add_argument("--output", action="append", choices=["terminal", "json"], default=None)
     diff_p.add_argument("--json-path")
     diff_p.add_argument("--fail-on", choices=["none", "any", "count"], default="any")

@@ -413,6 +413,57 @@ def _apply_column_match(
     _append_run_level_warnings(src_plan, result)
 
 
+_SAMPLE_MODULUS = 1000  # 0.1% granularity -- --sample 0.5% is meaningful, not just whole percentages
+
+
+def _apply_sample_predicate(plan: _Plan, pct: float) -> None:
+    """Folds spec §4.3's deterministic sampling predicate into
+    `plan.where` — "apply the same sampling predicate to both sides
+    (deterministic, based on hash(pk) % 100 < 1 so both sides pick the
+    *same* rows)". Reuses the SAME `normalise_expr`/`row_hash_expr`
+    connector methods already proven to compute the identical 64-bit
+    hash for the same canonical string across engines (spec §5's
+    cross-engine hash-equality test), so both sides pick the exact same
+    key values with no new connector method and no engine-specific code
+    here. Folded into `plan.where` — the same WHERE every bounds/
+    segment/count query already uses — so a sampled run pushes exactly
+    as much work down to the database as a `--where`-filtered one always
+    has (spec §2: "never pull full tables to the client").
+    """
+    connector = plan.connector
+    key_exprs = [
+        connector.normalise_expr(plan.columns_by_name[c], plan.rule_for(c), plan.options)
+        for c in plan.key_columns
+    ]
+    row_hash = connector.row_hash_expr(key_exprs)
+    # Double modulo (as aggregate_hash_expr's own connectors already do)
+    # folds a signed hash into an unsigned [0, modulus) bucket regardless
+    # of engine-specific negative-modulo semantics.
+    bucket = f"((({row_hash}) % {_SAMPLE_MODULUS}) + {_SAMPLE_MODULUS}) % {_SAMPLE_MODULUS}"
+    threshold = max(0, min(_SAMPLE_MODULUS, round(pct * _SAMPLE_MODULUS / 100)))
+    predicate = f"{bucket} < {threshold}"
+    plan.where = f"({plan.where}) AND ({predicate})" if plan.where else predicate
+
+
+def _resolve_sample_pct(
+    src_plan: _Plan, tgt_plan: _Plan, sample: float | None, sample_rows: int | None
+) -> float:
+    """`--sample PCT` is already a percentage. `--sample-rows N` needs the
+    *un-sampled*, already-`--where`-scoped row count first (one extra
+    bounds query per side, run before any sampling predicate exists) to
+    know what percentage yields roughly N rows — spec §4.3 offers both as
+    alternatives, not a combination, so exactly one of these is ever set
+    (enforced by the CLI layer, spec §7)."""
+    if sample is not None:
+        return sample
+    _, _, src_pre_count = _get_bounds(src_plan)
+    _, _, tgt_pre_count = _get_bounds(tgt_plan)
+    pre_count = max(src_pre_count, tgt_pre_count)
+    if pre_count == 0:
+        return 100.0
+    return min(100.0, sample_rows / pre_count * 100.0)
+
+
 def _append_run_level_warnings(plan: _Plan, result: DiffResult) -> None:
     """TS-3 ("warn once per run") and UNK-1 ("warn once per column") from
     spec §6.1 — scanned once, off the already-matched plan, so a column
@@ -464,6 +515,8 @@ def diff(
     threads: int = 1,
     source_pool: list[Connector] | None = None,
     target_pool: list[Connector] | None = None,
+    sample: float | None = None,
+    sample_rows: int | None = None,
 ) -> DiffResult:
     """spec §7: `--threads N` — "parallel segment queries per side
     (default 4)". `source`/`target` still do every single-shot query
@@ -504,8 +557,17 @@ def diff(
     )
     _apply_column_match(src_plan, tgt_plan, result, options, column_map)
 
+    # Uniqueness is checked on the full --where-scoped data, never just
+    # the sample: whether a chosen key is genuinely unique can't depend
+    # on which rows a hash-bucket sample happened to land on — a
+    # non-unique key outside the sample would otherwise go undetected.
     _validate_key_unique_side(src_plan)
     _validate_key_unique_side(tgt_plan)
+
+    if sample is not None or sample_rows is not None:
+        result.sample_pct = _resolve_sample_pct(src_plan, tgt_plan, sample, sample_rows)
+        _apply_sample_predicate(src_plan, result.sample_pct)
+        _apply_sample_predicate(tgt_plan, result.sample_pct)
 
     src_lo, src_hi, src_count = _get_bounds(src_plan)
     tgt_lo, tgt_hi, tgt_count = _get_bounds(tgt_plan)

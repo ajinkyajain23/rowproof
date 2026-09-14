@@ -30,6 +30,12 @@ def _display(value):
 def render_terminal(result: DiffResult) -> str:
     lines = []
     lines.append(f"{result.source.qualified_name}  {result.source}  ->  {result.target}")
+    if result.sample_pct is not None:
+        # spec §4.3: "Report results as 'of the sampled rows' with the
+        # sample size stated. Never silently sample." — on its own line,
+        # right under the header, so it can't be missed or mistaken for
+        # a full-table result.
+        lines.append(f"  SAMPLED        {result.sample_pct:g}% of rows — counts below are of the sample only")
     lines.append(f"  rows           {result.source_count:<20} {result.target_count:<20}")
     lines.append(f"  key            {', '.join(result.key_columns)}")
     if result.excluded_columns:
@@ -95,6 +101,7 @@ def render_json(
         "target": result.target,
         "key_columns": list(result.key_columns),
         "algorithm": result.algorithm,
+        "sample_pct": result.sample_pct,
         "source_count": result.source_count,
         "target_count": result.target_count,
         "missing_in_target": result.missing_in_target,

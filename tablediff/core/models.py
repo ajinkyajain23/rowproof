@@ -167,6 +167,17 @@ class DiffResult:
     # algorithm line, and §8.2's JSON output requires "timings" — wall
     # clock time for the whole diff()/explain() call, set by the caller.
     elapsed_seconds: float = 0.0
+    # spec §4.3: "--sample 1% ... Report results as 'of the sampled rows'
+    # with the sample size stated. Never silently sample." None means no
+    # sampling was requested — every count above is the real, whole-table
+    # figure. A number (0-100) means `--sample`/`--sample-rows` was used;
+    # every count above already reflects only the sampled subset (the
+    # sampling predicate is folded into the same WHERE every bounds/
+    # segment/count query already uses, spec §2's "never pull full tables
+    # to the client" applying just as much to a sampled run), and the
+    # renderer's job is to make that fact impossible to miss, not to
+    # recompute anything.
+    sample_pct: float | None = None
 
     @property
     def is_match(self) -> bool:
