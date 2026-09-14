@@ -304,3 +304,77 @@ class TestClickHouseKeySegmentation:
         )
         assert result.is_match, result.row_diffs
         assert result.source_count == 3000
+
+
+class TestClickHouseSpecificTypes:
+    """spec §9 M2: "Nullable() handling; LowCardinality, Enum8/16, Array,
+    Map (as text, UNK-1) types" — a real end-to-end diff exercising every
+    one of these column shapes together against a live server, not just
+    the unit-level _resolve()/_unwrap() string mapping (which can't prove
+    the generated SQL actually executes -- exactly the class of gap that
+    let the real DEC-1 bugs through unit tests alone)."""
+
+    def test_enum_array_map_lowcardinality_nullable_self_diff_matches(self, ch_database):
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        ddl = (
+            "id UInt64, status Enum8('active' = 1, 'inactive' = 2), "
+            "tags Array(String), meta Map(String, UInt32), "
+            "label LowCardinality(String), note Nullable(String)"
+        )
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.a ({ddl}) ENGINE = MergeTree ORDER BY id")
+        run_query(
+            ch_dsn,
+            f"INSERT INTO `{ch_database}`.a VALUES "
+            "(1, 'active', ['a','b'], {'x':1,'y':2}, 'cat1', 'hi'), "
+            "(2, 'inactive', [], {}, 'cat2', NULL)",
+        )
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b AS `{ch_database}`.a")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b SELECT * FROM `{ch_database}`.a")
+
+        source = ClickHouseConnector()
+        source.connect(_ch_dsn_for_database(ch_database))
+        target = ClickHouseConnector()
+        target.connect(_ch_dsn_for_database(ch_database))
+
+        result = hashdiff(
+            source, target,
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert result.is_match, result.row_diffs
+        assert result.source_count == 2
+        # Map has no dedicated rule (spec: "as text, UNK-1") -- Array and
+        # Enum8 do (ARR-1, ENUM-1), so only "meta" should warn UNK-1.
+        unk1_columns = {w.column for w in result.warnings if w.rule and w.rule.value == "UNK-1"}
+        assert unk1_columns == {"meta"}, result.warnings
+
+    def test_enum_array_map_reports_a_real_change(self, ch_database):
+        """Same shapes, but this time the two sides genuinely differ in
+        each of Enum8, Array, Map and LowCardinality columns -- proving
+        these render distinctly, not just identically."""
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        ddl = (
+            "id UInt64, status Enum8('active' = 1, 'inactive' = 2), "
+            "tags Array(String), meta Map(String, UInt32), label LowCardinality(String)"
+        )
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.a ({ddl}) ENGINE = MergeTree ORDER BY id")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.a VALUES (1, 'active', ['a','b'], {{'x':1}}, 'cat1')")
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b AS `{ch_database}`.a")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b VALUES (1, 'inactive', ['a','c'], {{'x':2}}, 'cat2')")
+
+        source = ClickHouseConnector()
+        source.connect(_ch_dsn_for_database(ch_database))
+        target = ClickHouseConnector()
+        target.connect(_ch_dsn_for_database(ch_database))
+
+        result = hashdiff(
+            source, target,
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert not result.is_match
+        assert result.changed == 1
+        changed_cols = set(result.row_diffs[0].changes)
+        assert changed_cols == {"status", "tags", "meta", "label"}, result.row_diffs[0].changes
