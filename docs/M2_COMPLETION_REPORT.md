@@ -1,6 +1,7 @@
 # M2 Completion Report — ClickHouse
 
-**Status: done, accepted** (one documented, accepted exception — see below).
+**Status: done, accepted** (one documented, accepted exception — see below;
+all other issues found during post-acceptance review have been fixed).
 
 Run against real Postgres 16 + ClickHouse 24.8 (Docker Desktop, this
 machine). Environment: `TABLEDIFF_TEST_CH_DSN=clickhouse://default:clickhouse@127.0.0.1:8123/default`.
@@ -23,8 +24,9 @@ keys (String and UUID were genuinely broken — hard syntax errors — before
 this session, `TestClickHouseKeySegmentation`); `DateTime`/`DateTime64`
 precision (TS-2); `Nullable()` handling; `LowCardinality`, `Enum8`/`Enum16`,
 `Array`, `Map` (as text, UNK-1) types (`TestClickHouseSpecificTypes`);
-`Float64`/FLT-1 (`TestFloatAcrossEngines`, added in a post-acceptance
-review pass — see below).
+`Float64`/FLT-1 (`TestFloatAcrossEngines`); `joindiff` against
+ClickHouse (`TestJoindiffAgainstRealClickHouse`) — both added in a
+post-acceptance review pass, see below.
 
 ## Post-acceptance review findings
 
@@ -52,17 +54,35 @@ one of its named criteria — but it's real evidence that "M2 done" from a
 test pass is not the same as "no more bugs," and is recorded here rather
 than left out. New `TestFloatAcrossEngines` covers it going forward.
 
-Also found, and *not* fixed (genuinely out of scope): pointing `tablediff
-diff` at two ClickHouse tables in the **same** database auto-selects
-`joindiff` (per spec §4.2's own routing rule — same engine, same
-connection), and `core/joindiff.py` unconditionally emits Postgres's `IS
-DISTINCT FROM` syntax, which ClickHouse rejects. This was never spec'd or
-tested for ClickHouse (SPEC §13 M2's criteria are all about `hashdiff`,
-the cross-engine algorithm; §4.2 defines joindiff as same-engine-only).
-It fails *cleanly* — exit 2, a clear `error: ...` message, no traceback —
-so it's not silent corruption, but a real user pointing joindiff-eligible
-ClickHouse tables at each other will hit it. Worth a follow-up, not a
-blocker for M2 as scoped.
+Also found, and now fixed (commit `3004ee9`): pointing `tablediff diff`
+at two ClickHouse tables in the **same** database auto-selects `joindiff`
+(per spec §4.2's own routing rule — same engine, same connection), and
+`core/joindiff.py` had never been run against ClickHouse before. Three
+separate bugs, all confirmed against a real server:
+
+1. `IS DISTINCT FROM` doesn't exist in ClickHouse — its `<=>` equivalent
+   is restricted to `JOIN ON` clauses only, unusable in the WHERE clause
+   joindiff needs it in. Fixed with a hand-built, portable NULL-safe
+   distinct expression that needs no engine branch at all.
+2. `COUNT(*) FILTER (WHERE ...)`, used three times over a WHERE clause
+   built from several OR'd conditions, hits a real ClickHouse parser bug
+   ("Aggregate function COUNT requires zero or one argument") even
+   though every piece works alone. Fixed with portable
+   `COALESCE(SUM(CASE WHEN ... THEN 1 ELSE 0 END), 0)`.
+3. The most serious: ClickHouse's `FULL OUTER JOIN` fills a non-Nullable
+   key column's unmatched side with the type's default value (`0` for
+   UInt64), not SQL NULL — so missing-in-target/extra-in-target
+   detection itself silently never fired for any typical non-Nullable
+   primary key. Fixed by wrapping the key in `toNullable()` inside each
+   side's subquery.
+
+Verified end to end through the real CLI (auto-selected joindiff against
+two same-database ClickHouse tables) for both the differences case and
+the match case. New `TestJoindiffAgainstRealClickHouse` covers it going
+forward — this also means SPEC §13 M2's own PASS list is, in a sense,
+now stronger than what M2 originally required (joindiff-on-ClickHouse
+was never one of its named criteria), which is the point of a review
+pass like this one.
 
 ## What was fixed to get here
 
@@ -96,11 +116,14 @@ blocker for M2 as scoped.
    "differences" from 1,000 to 4.58 million before the real bugs above
    were even reached) — full investigation in
    [`docs/benchmarks.md`](benchmarks.md).
-7. **Three real FLT-1 bugs** (see "Post-acceptance review findings" above).
+7. **Three real FLT-1 bugs**, and **three real joindiff-against-ClickHouse
+   bugs** (see "Post-acceptance review findings" above).
 
 ## Commits this session
 
 ```
+3004ee9 Fix joindiff against ClickHouse: three real bugs, all confirmed live
+8638daf Update M2 report: post-acceptance findings, fresh 211-test run, exact test names
 1cf57d7 Fix three real bugs in ClickHouse FLT-1 rendering, found by review request
 28cd197 Add M2 completion report
 4b682c2 Accept M2 as done — 100M-row benchmark's 5-min target waived (hardware-bound)
@@ -115,18 +138,16 @@ b9a1c0f Import M0-M2 code from cloud session
 
 ## Full test suite
 
-**211 passed, 0 skipped** — every test in `tests/integration/test_clickhouse_real.py`
-runs for real (none skip for an unreachable server anymore). Includes the
-two new `TestFloatAcrossEngines` tests added by the FLT-1 fix above.
+**214 passed, 0 skipped** — every test in `tests/integration/test_clickhouse_real.py` runs for real (none skip for an unreachable server anymore). Includes the two `TestFloatAcrossEngines` tests and the three `TestJoindiffAgainstRealClickHouse` tests added by the post-acceptance review fixes.
 
 ```
-============================= test session starts =============================
+﻿============================= test session starts =============================
 platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0 -- C:\dev\tablediff\.venv\Scripts\python.exe
 cachedir: .pytest_cache
 rootdir: C:\dev\tablediff
 configfile: pyproject.toml
 testpaths: tests
-collecting ... collected 211 items
+collecting ... collected 214 items
 
 tests/integration/test_clickhouse_real.py::TestCrossEngineHashEqualityLive::test_same_fixture_string_hashes_equal_on_both_engines[hello] PASSED [  0%]
 tests/integration/test_clickhouse_real.py::TestCrossEngineHashEqualityLive::test_same_fixture_string_hashes_equal_on_both_engines[] PASSED [  0%]
@@ -144,154 +165,157 @@ tests/integration/test_clickhouse_real.py::TestClickHouseKeySegmentation::test_u
 tests/integration/test_clickhouse_real.py::TestClickHouseSpecificTypes::test_enum_array_map_lowcardinality_nullable_self_diff_matches PASSED [  6%]
 tests/integration/test_clickhouse_real.py::TestClickHouseSpecificTypes::test_enum_array_map_reports_a_real_change PASSED [  7%]
 tests/integration/test_clickhouse_real.py::TestCliSupportsClickHouse::test_cli_diff_postgres_to_clickhouse_returns_exit_0_on_match PASSED [  7%]
-tests/integration/test_joindiff_real.py::TestJoindiffAgainstRealPostgres::test_identical_tables_match PASSED [  8%]
-tests/integration/test_joindiff_real.py::TestJoindiffAgainstRealPostgres::test_missing_extra_and_changed_rows_in_a_single_query PASSED [  8%]
-tests/integration/test_joindiff_real.py::TestJoindiffAgainstRealPostgres::test_dec_1_pair_scale_applies_inside_the_join PASSED [  9%]
-tests/integration/test_joindiff_real.py::TestJoindiffAgainstRealPostgres::test_max_diff_rows_bounds_the_detail_fetch_with_exact_counts PASSED [  9%]
-tests/integration/test_joindiff_real.py::TestJoindiffAgainstRealPostgres::test_where_filters_both_sides_inside_the_join PASSED [  9%]
-tests/integration/test_m0_acceptance.py::TestCliExitCodesAgainstRealPostgres::test_cli_diff_returns_exit_0_when_tables_match PASSED [ 10%]
-tests/integration/test_m0_acceptance.py::TestCliExitCodesAgainstRealPostgres::test_cli_diff_returns_exit_1_when_tables_differ PASSED [ 10%]
-tests/integration/test_m0_acceptance.py::TestIdenticalOneMillionRows::test_two_identical_1m_row_tables_match_exit_0_under_10s PASSED [ 11%]
-tests/integration/test_m0_acceptance.py::TestDeleteUpdateInsert::test_delete_10_update_10_insert_10_reported_and_classified PASSED [ 11%]
-tests/integration/test_m0_acceptance.py::TestEmptyTableEdgeCases::test_source_empty_target_has_rows_reports_all_as_extra PASSED [ 12%]
-tests/integration/test_m0_acceptance.py::TestEmptyTableEdgeCases::test_target_empty_source_has_rows_reports_all_as_missing PASSED [ 12%]
-tests/integration/test_m0_acceptance.py::TestEmptyTableEdgeCases::test_both_sides_empty_is_a_match PASSED [ 13%]
-tests/integration/test_m0_acceptance.py::TestColumnsAndExclude::test_exclude_hides_a_differing_column_from_the_diff PASSED [ 13%]
-tests/integration/test_m0_acceptance.py::TestColumnsAndExclude::test_columns_restricts_comparison_to_the_named_set PASSED [ 14%]
-tests/integration/test_m0_acceptance.py::TestWhereFilteringReal::test_where_excludes_rows_on_both_sides_real_postgres PASSED [ 14%]
-tests/integration/test_m0_acceptance.py::TestWhereFilteringReal::test_where_source_and_where_target_differ_per_side_real_postgres PASSED [ 15%]
-tests/integration/test_m0_acceptance.py::TestWhereFilteringReal::test_duplicate_key_scoped_by_where_real_postgres PASSED [ 15%]
-tests/integration/test_m0_acceptance.py::TestWhereFilteringReal::test_cli_where_flag_end_to_end PASSED [ 16%]
-tests/integration/test_m0_acceptance.py::TestMixedCaseTextKeysReal::test_mixed_case_text_keys_diff_correctly_under_locale_aware_collation PASSED [ 16%]
-tests/integration/test_m0_acceptance.py::TestCompositeKeyReal::test_composite_key_tenant_id_order_id PASSED [ 17%]
-tests/integration/test_m0_acceptance.py::TestTextColumnsWithLeadingZerosAreNotCorrupted::test_leading_zero_text_value_is_reported_intact_not_as_a_corrupted_int PASSED [ 17%]
-tests/integration/test_m0_acceptance.py::TestUuidKeySegmentBalance::test_uuid_key_no_segment_holds_more_than_2x_average PASSED [ 18%]
-tests/integration/test_m0_acceptance.py::TestSegmentQueriesUsePkIndex::test_uuid_key_segment_query_uses_pk_index PASSED [ 18%]
-tests/integration/test_m0_acceptance.py::TestSegmentQueriesUsePkIndex::test_text_key_segment_query_uses_pk_index_under_default_collation PASSED [ 18%]
-tests/integration/test_m0_acceptance.py::TestNoPrimaryKeyExitsTwo::test_table_without_pk_and_no_key_flag_exits_2_with_clear_message PASSED [ 19%]
-tests/integration/test_m0_acceptance.py::TestNoPrimaryKeyExitsTwo::test_still_clean_exit_2_no_traceback_when_verbose_is_on PASSED [ 19%]
-tests/integration/test_m0_acceptance.py::TestNonUniqueKeyExitsTwo::test_non_unique_key_exits_2_and_shows_duplicate_example PASSED [ 20%]
-tests/integration/test_m0_acceptance.py::TestExplainExecutesNoDataQueries::test_explain_prints_sql_and_touches_no_row_data PASSED [ 20%]
-tests/integration/test_m0_acceptance.py::TestNetworkDropMidRun::test_postgres_actually_killed_mid_run_is_a_clean_error_no_traceback PASSED [ 21%]
-tests/integration/test_m0_acceptance.py::TestPasswordNeverLogged::test_password_never_appears_in_any_output_including_verbose PASSED [ 21%]
-tests/integration/test_m0_acceptance.py::TestThreadedHashdiffMatchesSequential::test_parallel_result_matches_sequential_result_exactly PASSED [ 22%]
-tests/integration/test_m0_acceptance.py::TestThreadedHashdiffMatchesSequential::test_threads_flag_without_a_pool_falls_back_to_sequential PASSED [ 22%]
-tests/integration/test_m1_cli.py::TestAlgorithmAutoSelection::test_auto_picks_joindiff_when_both_sides_are_the_same_database PASSED [ 23%]
-tests/integration/test_m1_cli.py::TestAlgorithmAutoSelection::test_auto_picks_hashdiff_when_databases_differ PASSED [ 23%]
-tests/integration/test_m1_cli.py::TestAlgorithmAutoSelection::test_algorithm_hashdiff_forces_hashdiff_even_on_the_same_database PASSED [ 24%]
-tests/integration/test_m1_cli.py::TestNormalisationFlagsEndToEnd::test_trim_flag_makes_trailing_whitespace_match PASSED [ 24%]
-tests/integration/test_m1_cli.py::TestNormalisationFlagsEndToEnd::test_column_map_flag_matches_differently_named_columns PASSED [ 25%]
-tests/integration/test_m1_cli.py::TestNullRenderedAsNullNotBackslashN::test_terminal_output_shows_null_not_backslash_n PASSED [ 25%]
-tests/integration/test_m1_cli.py::TestNullRenderedAsNullNotBackslashN::test_json_output_shows_null_not_backslash_n PASSED [ 26%]
-tests/integration/test_m1_cli.py::TestJsonOutputM1Fields::test_json_output_carries_excluded_columns_timings_and_sql PASSED [ 26%]
-tests/integration/test_m1_fixtures.py::TestTimestampFixtures::test_tz_aware_converts_to_utc_iso8601 PASSED [ 27%]
-tests/integration/test_m1_fixtures.py::TestTimestampFixtures::test_naive_timestamp_rendered_as_is_with_z_suffix_and_warns_once PASSED [ 27%]
-tests/integration/test_m1_fixtures.py::TestTimestampFixtures::test_min_and_max_timestamps PASSED [ 27%]
-tests/integration/test_m1_fixtures.py::TestTs2PrecisionMismatch::test_truncating_to_lower_precision_makes_same_second_a_match PASSED [ 28%]
-tests/integration/test_m1_fixtures.py::TestTs2PrecisionMismatch::test_reports_changed_with_ts2_citation_when_truncated_values_still_differ PASSED [ 28%]
-tests/integration/test_m1_fixtures.py::TestTs2PrecisionMismatch::test_rounds_half_up_at_lower_precision_not_truncates PASSED [ 29%]
-tests/integration/test_m1_fixtures.py::TestTs2TimePrecisionMismatch::test_time_precision_pair_rounds_half_up_and_matches PASSED [ 29%]
-tests/integration/test_m1_fixtures.py::TestTs2TimePrecisionMismatch::test_time_precision_pair_reports_changed_when_rounded_values_still_differ PASSED [ 30%]
-tests/integration/test_m1_fixtures.py::TestDecimalFixtures::test_pair_compares_at_min_scale_of_the_two_sides PASSED [ 30%]
-tests/integration/test_m1_fixtures.py::TestDecimalFixtures::test_negative_zero_renders_as_zero PASSED [ 31%]
-tests/integration/test_m1_fixtures.py::TestDecimalFixtures::test_round_half_even_at_exact_midpoints_not_round_half_away_from_zero PASSED [ 31%]
-tests/integration/test_m1_fixtures.py::TestFloatFixtures::test_default_15_significant_figures_scientific_notation PASSED [ 32%]
-tests/integration/test_m1_fixtures.py::TestFloatFixtures::test_negative_zero_and_positive_zero_render_identically PASSED [ 32%]
-tests/integration/test_m1_fixtures.py::TestFloatFixtures::test_nan_both_sides_nan_is_equal PASSED [ 33%]
-tests/integration/test_m1_fixtures.py::TestFloatFixtures::test_infinity_renders_literally PASSED [ 33%]
-tests/integration/test_m1_fixtures.py::TestFloatFixtures::test_float_precision_override_changes_significant_digit_count PASSED [ 34%]
-tests/integration/test_m1_fixtures.py::TestStringFixtures::test_str1_no_trim_no_case_fold_by_default PASSED [ 34%]
+tests/integration/test_clickhouse_real.py::TestJoindiffAgainstRealClickHouse::test_missing_extra_and_changed_detected_correctly PASSED [  7%]
+tests/integration/test_clickhouse_real.py::TestJoindiffAgainstRealClickHouse::test_identical_tables_match PASSED [  8%]
+tests/integration/test_clickhouse_real.py::TestJoindiffAgainstRealClickHouse::test_cli_auto_selects_joindiff_for_same_connection_and_succeeds PASSED [  8%]
+tests/integration/test_joindiff_real.py::TestJoindiffAgainstRealPostgres::test_identical_tables_match PASSED [  9%]
+tests/integration/test_joindiff_real.py::TestJoindiffAgainstRealPostgres::test_missing_extra_and_changed_rows_in_a_single_query PASSED [  9%]
+tests/integration/test_joindiff_real.py::TestJoindiffAgainstRealPostgres::test_dec_1_pair_scale_applies_inside_the_join PASSED [ 10%]
+tests/integration/test_joindiff_real.py::TestJoindiffAgainstRealPostgres::test_max_diff_rows_bounds_the_detail_fetch_with_exact_counts PASSED [ 10%]
+tests/integration/test_joindiff_real.py::TestJoindiffAgainstRealPostgres::test_where_filters_both_sides_inside_the_join PASSED [ 11%]
+tests/integration/test_m0_acceptance.py::TestCliExitCodesAgainstRealPostgres::test_cli_diff_returns_exit_0_when_tables_match PASSED [ 11%]
+tests/integration/test_m0_acceptance.py::TestCliExitCodesAgainstRealPostgres::test_cli_diff_returns_exit_1_when_tables_differ PASSED [ 12%]
+tests/integration/test_m0_acceptance.py::TestIdenticalOneMillionRows::test_two_identical_1m_row_tables_match_exit_0_under_10s PASSED [ 12%]
+tests/integration/test_m0_acceptance.py::TestDeleteUpdateInsert::test_delete_10_update_10_insert_10_reported_and_classified PASSED [ 13%]
+tests/integration/test_m0_acceptance.py::TestEmptyTableEdgeCases::test_source_empty_target_has_rows_reports_all_as_extra PASSED [ 13%]
+tests/integration/test_m0_acceptance.py::TestEmptyTableEdgeCases::test_target_empty_source_has_rows_reports_all_as_missing PASSED [ 14%]
+tests/integration/test_m0_acceptance.py::TestEmptyTableEdgeCases::test_both_sides_empty_is_a_match PASSED [ 14%]
+tests/integration/test_m0_acceptance.py::TestColumnsAndExclude::test_exclude_hides_a_differing_column_from_the_diff PASSED [ 14%]
+tests/integration/test_m0_acceptance.py::TestColumnsAndExclude::test_columns_restricts_comparison_to_the_named_set PASSED [ 15%]
+tests/integration/test_m0_acceptance.py::TestWhereFilteringReal::test_where_excludes_rows_on_both_sides_real_postgres PASSED [ 15%]
+tests/integration/test_m0_acceptance.py::TestWhereFilteringReal::test_where_source_and_where_target_differ_per_side_real_postgres PASSED [ 16%]
+tests/integration/test_m0_acceptance.py::TestWhereFilteringReal::test_duplicate_key_scoped_by_where_real_postgres PASSED [ 16%]
+tests/integration/test_m0_acceptance.py::TestWhereFilteringReal::test_cli_where_flag_end_to_end PASSED [ 17%]
+tests/integration/test_m0_acceptance.py::TestMixedCaseTextKeysReal::test_mixed_case_text_keys_diff_correctly_under_locale_aware_collation PASSED [ 17%]
+tests/integration/test_m0_acceptance.py::TestCompositeKeyReal::test_composite_key_tenant_id_order_id PASSED [ 18%]
+tests/integration/test_m0_acceptance.py::TestTextColumnsWithLeadingZerosAreNotCorrupted::test_leading_zero_text_value_is_reported_intact_not_as_a_corrupted_int PASSED [ 18%]
+tests/integration/test_m0_acceptance.py::TestUuidKeySegmentBalance::test_uuid_key_no_segment_holds_more_than_2x_average PASSED [ 19%]
+tests/integration/test_m0_acceptance.py::TestSegmentQueriesUsePkIndex::test_uuid_key_segment_query_uses_pk_index PASSED [ 19%]
+tests/integration/test_m0_acceptance.py::TestSegmentQueriesUsePkIndex::test_text_key_segment_query_uses_pk_index_under_default_collation PASSED [ 20%]
+tests/integration/test_m0_acceptance.py::TestNoPrimaryKeyExitsTwo::test_table_without_pk_and_no_key_flag_exits_2_with_clear_message PASSED [ 20%]
+tests/integration/test_m0_acceptance.py::TestNoPrimaryKeyExitsTwo::test_still_clean_exit_2_no_traceback_when_verbose_is_on PASSED [ 21%]
+tests/integration/test_m0_acceptance.py::TestNonUniqueKeyExitsTwo::test_non_unique_key_exits_2_and_shows_duplicate_example PASSED [ 21%]
+tests/integration/test_m0_acceptance.py::TestExplainExecutesNoDataQueries::test_explain_prints_sql_and_touches_no_row_data PASSED [ 21%]
+tests/integration/test_m0_acceptance.py::TestNetworkDropMidRun::test_postgres_actually_killed_mid_run_is_a_clean_error_no_traceback PASSED [ 22%]
+tests/integration/test_m0_acceptance.py::TestPasswordNeverLogged::test_password_never_appears_in_any_output_including_verbose PASSED [ 22%]
+tests/integration/test_m0_acceptance.py::TestThreadedHashdiffMatchesSequential::test_parallel_result_matches_sequential_result_exactly PASSED [ 23%]
+tests/integration/test_m0_acceptance.py::TestThreadedHashdiffMatchesSequential::test_threads_flag_without_a_pool_falls_back_to_sequential PASSED [ 23%]
+tests/integration/test_m1_cli.py::TestAlgorithmAutoSelection::test_auto_picks_joindiff_when_both_sides_are_the_same_database PASSED [ 24%]
+tests/integration/test_m1_cli.py::TestAlgorithmAutoSelection::test_auto_picks_hashdiff_when_databases_differ PASSED [ 24%]
+tests/integration/test_m1_cli.py::TestAlgorithmAutoSelection::test_algorithm_hashdiff_forces_hashdiff_even_on_the_same_database PASSED [ 25%]
+tests/integration/test_m1_cli.py::TestNormalisationFlagsEndToEnd::test_trim_flag_makes_trailing_whitespace_match PASSED [ 25%]
+tests/integration/test_m1_cli.py::TestNormalisationFlagsEndToEnd::test_column_map_flag_matches_differently_named_columns PASSED [ 26%]
+tests/integration/test_m1_cli.py::TestNullRenderedAsNullNotBackslashN::test_terminal_output_shows_null_not_backslash_n PASSED [ 26%]
+tests/integration/test_m1_cli.py::TestNullRenderedAsNullNotBackslashN::test_json_output_shows_null_not_backslash_n PASSED [ 27%]
+tests/integration/test_m1_cli.py::TestJsonOutputM1Fields::test_json_output_carries_excluded_columns_timings_and_sql PASSED [ 27%]
+tests/integration/test_m1_fixtures.py::TestTimestampFixtures::test_tz_aware_converts_to_utc_iso8601 PASSED [ 28%]
+tests/integration/test_m1_fixtures.py::TestTimestampFixtures::test_naive_timestamp_rendered_as_is_with_z_suffix_and_warns_once PASSED [ 28%]
+tests/integration/test_m1_fixtures.py::TestTimestampFixtures::test_min_and_max_timestamps PASSED [ 28%]
+tests/integration/test_m1_fixtures.py::TestTs2PrecisionMismatch::test_truncating_to_lower_precision_makes_same_second_a_match PASSED [ 29%]
+tests/integration/test_m1_fixtures.py::TestTs2PrecisionMismatch::test_reports_changed_with_ts2_citation_when_truncated_values_still_differ PASSED [ 29%]
+tests/integration/test_m1_fixtures.py::TestTs2PrecisionMismatch::test_rounds_half_up_at_lower_precision_not_truncates PASSED [ 30%]
+tests/integration/test_m1_fixtures.py::TestTs2TimePrecisionMismatch::test_time_precision_pair_rounds_half_up_and_matches PASSED [ 30%]
+tests/integration/test_m1_fixtures.py::TestTs2TimePrecisionMismatch::test_time_precision_pair_reports_changed_when_rounded_values_still_differ PASSED [ 31%]
+tests/integration/test_m1_fixtures.py::TestDecimalFixtures::test_pair_compares_at_min_scale_of_the_two_sides PASSED [ 31%]
+tests/integration/test_m1_fixtures.py::TestDecimalFixtures::test_negative_zero_renders_as_zero PASSED [ 32%]
+tests/integration/test_m1_fixtures.py::TestDecimalFixtures::test_round_half_even_at_exact_midpoints_not_round_half_away_from_zero PASSED [ 32%]
+tests/integration/test_m1_fixtures.py::TestFloatFixtures::test_default_15_significant_figures_scientific_notation PASSED [ 33%]
+tests/integration/test_m1_fixtures.py::TestFloatFixtures::test_negative_zero_and_positive_zero_render_identically PASSED [ 33%]
+tests/integration/test_m1_fixtures.py::TestFloatFixtures::test_nan_both_sides_nan_is_equal PASSED [ 34%]
+tests/integration/test_m1_fixtures.py::TestFloatFixtures::test_infinity_renders_literally PASSED [ 34%]
+tests/integration/test_m1_fixtures.py::TestFloatFixtures::test_float_precision_override_changes_significant_digit_count PASSED [ 35%]
+tests/integration/test_m1_fixtures.py::TestStringFixtures::test_str1_no_trim_no_case_fold_by_default PASSED [ 35%]
 tests/integration/test_m1_fixtures.py::TestStringFixtures::test_str2_trim_makes_trailing_whitespace_variant_match PASSED [ 35%]
-tests/integration/test_m1_fixtures.py::TestStringFixtures::test_strasse_vs_strasse_differ_even_case_insensitive PASSED [ 35%]
+tests/integration/test_m1_fixtures.py::TestStringFixtures::test_strasse_vs_strasse_differ_even_case_insensitive PASSED [ 36%]
 tests/integration/test_m1_fixtures.py::TestStringFixtures::test_emoji_rtl_and_10000_char_string_pass_through_unchanged PASSED [ 36%]
-tests/integration/test_m1_fixtures.py::TestStringFixtures::test_nul_byte_cannot_be_stored_in_postgres_text PASSED [ 36%]
-tests/integration/test_m1_fixtures.py::TestNullFixtures::test_null_vs_empty_string_vs_literal_null_text_all_distinct PASSED [ 36%]
-tests/integration/test_m1_fixtures.py::TestNullFixtures::test_null_vs_zero_int PASSED [ 37%]
-tests/integration/test_m1_fixtures.py::TestBooleanFixtures::test_true_false_render_as_literal_words PASSED [ 37%]
-tests/integration/test_m1_fixtures.py::TestBooleanFixtures::test_boolean_vs_integer_0_1_is_excluded_as_incompatible_not_silently_mapped PASSED [ 38%]
-tests/integration/test_m1_fixtures.py::TestUuidFixtures::test_uuid_renders_lower_case_hyphenated_regardless_of_input_case PASSED [ 38%]
-tests/integration/test_m1_fixtures.py::TestUuidFixtures::test_uuid_without_hyphens_input_still_renders_hyphenated PASSED [ 39%]
-tests/integration/test_m1_fixtures.py::TestArrayFixtures::test_int_array_renders_bracket_format_order_sensitive PASSED [ 39%]
-tests/integration/test_m1_fixtures.py::TestArrayFixtures::test_empty_array_vs_null_stay_distinct PASSED [ 40%]
-tests/integration/test_m1_fixtures.py::TestArrayFixtures::test_text_array_with_null_element PASSED [ 40%]
-tests/integration/test_m1_fixtures.py::TestJsonFixtures::test_jsonb_key_order_is_engine_side_canonicalised PASSED [ 41%]
-tests/integration/test_m1_fixtures.py::TestJsonFixtures::test_plain_json_also_canonicalised_via_jsonb_cast PASSED [ 41%]
+tests/integration/test_m1_fixtures.py::TestStringFixtures::test_nul_byte_cannot_be_stored_in_postgres_text PASSED [ 37%]
+tests/integration/test_m1_fixtures.py::TestNullFixtures::test_null_vs_empty_string_vs_literal_null_text_all_distinct PASSED [ 37%]
+tests/integration/test_m1_fixtures.py::TestNullFixtures::test_null_vs_zero_int PASSED [ 38%]
+tests/integration/test_m1_fixtures.py::TestBooleanFixtures::test_true_false_render_as_literal_words PASSED [ 38%]
+tests/integration/test_m1_fixtures.py::TestBooleanFixtures::test_boolean_vs_integer_0_1_is_excluded_as_incompatible_not_silently_mapped PASSED [ 39%]
+tests/integration/test_m1_fixtures.py::TestUuidFixtures::test_uuid_renders_lower_case_hyphenated_regardless_of_input_case PASSED [ 39%]
+tests/integration/test_m1_fixtures.py::TestUuidFixtures::test_uuid_without_hyphens_input_still_renders_hyphenated PASSED [ 40%]
+tests/integration/test_m1_fixtures.py::TestArrayFixtures::test_int_array_renders_bracket_format_order_sensitive PASSED [ 40%]
+tests/integration/test_m1_fixtures.py::TestArrayFixtures::test_empty_array_vs_null_stay_distinct PASSED [ 41%]
+tests/integration/test_m1_fixtures.py::TestArrayFixtures::test_text_array_with_null_element PASSED [ 41%]
+tests/integration/test_m1_fixtures.py::TestJsonFixtures::test_jsonb_key_order_is_engine_side_canonicalised PASSED [ 42%]
+tests/integration/test_m1_fixtures.py::TestJsonFixtures::test_plain_json_also_canonicalised_via_jsonb_cast PASSED [ 42%]
 tests/integration/test_m1_fixtures.py::TestEnumFixtures::test_enum_renders_as_label_text PASSED [ 42%]
-tests/integration/test_m1_fixtures.py::TestBinaryFixtures::test_bytea_renders_lower_case_hex_without_backslash_x_prefix PASSED [ 42%]
+tests/integration/test_m1_fixtures.py::TestBinaryFixtures::test_bytea_renders_lower_case_hex_without_backslash_x_prefix PASSED [ 43%]
 tests/integration/test_m1_fixtures.py::TestDateTimeFixtures::test_date_renders_iso PASSED [ 43%]
-tests/integration/test_m1_fixtures.py::TestDateTimeFixtures::test_time_renders_with_six_fractional_digits PASSED [ 43%]
+tests/integration/test_m1_fixtures.py::TestDateTimeFixtures::test_time_renders_with_six_fractional_digits PASSED [ 44%]
 tests/integration/test_m1_fixtures.py::TestUnknownTypeNeverFailsARun::test_unknown_type_falls_back_to_text_cast_and_warns_once PASSED [ 44%]
-tests/integration/test_run_and_connections.py::TestRunCommand::test_run_reports_match_for_every_table_pair PASSED [ 44%]
+tests/integration/test_run_and_connections.py::TestRunCommand::test_run_reports_match_for_every_table_pair PASSED [ 45%]
 tests/integration/test_run_and_connections.py::TestRunCommand::test_run_exit_code_is_worst_across_all_table_pairs PASSED [ 45%]
-tests/integration/test_run_and_connections.py::TestRunCommand::test_run_with_env_var_secret_in_dsn PASSED [ 45%]
-tests/integration/test_run_and_connections.py::TestConnectionsTestCommand::test_connections_test_reports_ok_for_a_reachable_connection PASSED [ 45%]
-tests/integration/test_run_and_connections.py::TestConnectionsTestCommand::test_connections_test_fails_clearly_for_a_bad_connection PASSED [ 46%]
-tests/integration/test_run_and_connections.py::TestConnectionsTestCommand::test_connections_test_unknown_name_exits_2 PASSED [ 46%]
-tests/unit/test_cli_spec.py::test_parses_schema_and_table PASSED         [ 47%]
-tests/unit/test_cli_spec.py::test_table_without_explicit_schema_defaults_to_none PASSED [ 47%]
-tests/unit/test_cli_spec.py::test_missing_table_raises_clear_error PASSED [ 48%]
-tests/unit/test_clickhouse_connector.py::TestUnwrap::test_bare_type_is_not_nullable PASSED [ 48%]
-tests/unit/test_clickhouse_connector.py::TestUnwrap::test_nullable_wrapper_strips_and_flags_nullable PASSED [ 49%]
-tests/unit/test_clickhouse_connector.py::TestUnwrap::test_low_cardinality_wrapper_strips_without_flagging_nullable PASSED [ 49%]
+tests/integration/test_run_and_connections.py::TestRunCommand::test_run_with_env_var_secret_in_dsn PASSED [ 46%]
+tests/integration/test_run_and_connections.py::TestConnectionsTestCommand::test_connections_test_reports_ok_for_a_reachable_connection PASSED [ 46%]
+tests/integration/test_run_and_connections.py::TestConnectionsTestCommand::test_connections_test_fails_clearly_for_a_bad_connection PASSED [ 47%]
+tests/integration/test_run_and_connections.py::TestConnectionsTestCommand::test_connections_test_unknown_name_exits_2 PASSED [ 47%]
+tests/unit/test_cli_spec.py::test_parses_schema_and_table PASSED         [ 48%]
+tests/unit/test_cli_spec.py::test_table_without_explicit_schema_defaults_to_none PASSED [ 48%]
+tests/unit/test_cli_spec.py::test_missing_table_raises_clear_error PASSED [ 49%]
+tests/unit/test_clickhouse_connector.py::TestUnwrap::test_bare_type_is_not_nullable PASSED [ 49%]
+tests/unit/test_clickhouse_connector.py::TestUnwrap::test_nullable_wrapper_strips_and_flags_nullable PASSED [ 50%]
+tests/unit/test_clickhouse_connector.py::TestUnwrap::test_low_cardinality_wrapper_strips_without_flagging_nullable PASSED [ 50%]
 tests/unit/test_clickhouse_connector.py::TestUnwrap::test_low_cardinality_of_nullable_strips_both_and_flags_nullable PASSED [ 50%]
-tests/unit/test_clickhouse_connector.py::TestUnwrap::test_wrapper_stripping_does_not_touch_unrelated_parens PASSED [ 50%]
+tests/unit/test_clickhouse_connector.py::TestUnwrap::test_wrapper_stripping_does_not_touch_unrelated_parens PASSED [ 51%]
 tests/unit/test_clickhouse_connector.py::TestResolve::test_every_int_width_and_signedness_maps_to_int_1 PASSED [ 51%]
-tests/unit/test_clickhouse_connector.py::TestResolve::test_float32_and_float64_map_to_flt_1 PASSED [ 51%]
+tests/unit/test_clickhouse_connector.py::TestResolve::test_float32_and_float64_map_to_flt_1 PASSED [ 52%]
 tests/unit/test_clickhouse_connector.py::TestResolve::test_decimal_reports_scale_and_maps_to_dec_1 PASSED [ 52%]
-tests/unit/test_clickhouse_connector.py::TestResolve::test_decimal_with_no_explicit_scale_defaults_to_zero PASSED [ 52%]
+tests/unit/test_clickhouse_connector.py::TestResolve::test_decimal_with_no_explicit_scale_defaults_to_zero PASSED [ 53%]
 tests/unit/test_clickhouse_connector.py::TestResolve::test_fixed_width_decimal_variants_report_their_scale PASSED [ 53%]
-tests/unit/test_clickhouse_connector.py::TestResolve::test_datetime_maps_to_ts_1_family_with_precision_zero PASSED [ 53%]
+tests/unit/test_clickhouse_connector.py::TestResolve::test_datetime_maps_to_ts_1_family_with_precision_zero PASSED [ 54%]
 tests/unit/test_clickhouse_connector.py::TestResolve::test_datetime64_reports_its_precision_and_maps_to_ts_1_family PASSED [ 54%]
-tests/unit/test_clickhouse_connector.py::TestResolve::test_datetime64_with_timezone_argument_still_parses_precision PASSED [ 54%]
-tests/unit/test_clickhouse_connector.py::TestResolve::test_date_and_date32_map_to_date_1 PASSED [ 54%]
-tests/unit/test_clickhouse_connector.py::TestResolve::test_uuid_maps_to_uuid_1 PASSED [ 55%]
-tests/unit/test_clickhouse_connector.py::TestResolve::test_string_and_fixedstring_map_to_str_1 PASSED [ 55%]
-tests/unit/test_clickhouse_connector.py::TestResolve::test_bool_maps_to_bool_1 PASSED [ 56%]
-tests/unit/test_clickhouse_connector.py::TestResolve::test_enum8_and_enum16_map_to_enum_1 PASSED [ 56%]
+tests/unit/test_clickhouse_connector.py::TestResolve::test_datetime64_with_timezone_argument_still_parses_precision PASSED [ 55%]
+tests/unit/test_clickhouse_connector.py::TestResolve::test_date_and_date32_map_to_date_1 PASSED [ 55%]
+tests/unit/test_clickhouse_connector.py::TestResolve::test_uuid_maps_to_uuid_1 PASSED [ 56%]
+tests/unit/test_clickhouse_connector.py::TestResolve::test_string_and_fixedstring_map_to_str_1 PASSED [ 56%]
+tests/unit/test_clickhouse_connector.py::TestResolve::test_bool_maps_to_bool_1 PASSED [ 57%]
+tests/unit/test_clickhouse_connector.py::TestResolve::test_enum8_and_enum16_map_to_enum_1 PASSED [ 57%]
 tests/unit/test_clickhouse_connector.py::TestResolve::test_array_maps_to_arr_1 PASSED [ 57%]
-tests/unit/test_clickhouse_connector.py::TestResolve::test_map_falls_back_to_unk_1_per_spec PASSED [ 57%]
+tests/unit/test_clickhouse_connector.py::TestResolve::test_map_falls_back_to_unk_1_per_spec PASSED [ 58%]
 tests/unit/test_clickhouse_connector.py::TestResolve::test_tuple_falls_back_to_unk_1 PASSED [ 58%]
-tests/unit/test_clickhouse_connector.py::TestGetSchemaAndPrimaryKey::test_get_schema_maps_system_columns_rows_into_columns PASSED [ 58%]
+tests/unit/test_clickhouse_connector.py::TestGetSchemaAndPrimaryKey::test_get_schema_maps_system_columns_rows_into_columns PASSED [ 59%]
 tests/unit/test_clickhouse_connector.py::TestGetSchemaAndPrimaryKey::test_get_primary_key_returns_none_when_no_rows PASSED [ 59%]
-tests/unit/test_clickhouse_connector.py::TestGetSchemaAndPrimaryKey::test_get_primary_key_returns_names_in_order PASSED [ 59%]
+tests/unit/test_clickhouse_connector.py::TestGetSchemaAndPrimaryKey::test_get_primary_key_returns_names_in_order PASSED [ 60%]
 tests/unit/test_clickhouse_connector.py::TestNormaliseExprShape::test_int_1_wraps_null_check_when_nullable PASSED [ 60%]
-tests/unit/test_clickhouse_connector.py::TestNormaliseExprShape::test_row_hash_expr_single_column_skips_separator PASSED [ 60%]
+tests/unit/test_clickhouse_connector.py::TestNormaliseExprShape::test_row_hash_expr_single_column_skips_separator PASSED [ 61%]
 tests/unit/test_clickhouse_connector.py::TestNormaliseExprShape::test_row_hash_expr_multi_column_joins_with_unit_separator PASSED [ 61%]
-tests/unit/test_clickhouse_connector.py::TestNormaliseExprShape::test_quote_identifier_escapes_backtick PASSED [ 61%]
+tests/unit/test_clickhouse_connector.py::TestNormaliseExprShape::test_quote_identifier_escapes_backtick PASSED [ 62%]
 tests/unit/test_clickhouse_connector.py::TestNormaliseExprShape::test_quote_literal_escapes_quotes_and_backslashes PASSED [ 62%]
-tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[hello] PASSED [ 62%]
+tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[hello] PASSED [ 63%]
 tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[] PASSED [ 63%]
-tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[row-2] PASSED [ 63%]
-tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[2024-03-01T04:30:00.000000Z] PASSED [ 63%]
+tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[row-2] PASSED [ 64%]
+tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[2024-03-01T04:30:00.000000Z] PASSED [ 64%]
 tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[\\N] PASSED [ 64%]
-tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[12.50] PASSED [ 64%]
+tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[12.50] PASSED [ 65%]
 tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa] PASSED [ 65%]
-tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[unicode: caf\xe9 \u2603] PASSED [ 65%]
+tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_postgres_and_simulated_clickhouse_agree[unicode: caf\xe9 \u2603] PASSED [ 66%]
 tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_regression_values_match_the_empirically_confirmed_psql_round_trip PASSED [ 66%]
-tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_byte_order_actually_matters_here PASSED [ 66%]
+tests/unit/test_clickhouse_hash_reference.py::TestCrossEngineHashReference::test_byte_order_actually_matters_here PASSED [ 67%]
 tests/unit/test_column_matching.py::test_matched_columns_present_on_both_sides PASSED [ 67%]
-tests/unit/test_column_matching.py::test_case_insensitive_name_matching PASSED [ 67%]
+tests/unit/test_column_matching.py::test_case_insensitive_name_matching PASSED [ 68%]
 tests/unit/test_column_matching.py::test_column_map_override PASSED      [ 68%]
-tests/unit/test_column_matching.py::test_source_only_column_excluded_as_schema_difference PASSED [ 68%]
+tests/unit/test_column_matching.py::test_source_only_column_excluded_as_schema_difference PASSED [ 69%]
 tests/unit/test_column_matching.py::test_incompatible_type_families_excluded_and_reported_loudly PASSED [ 69%]
-tests/unit/test_column_matching.py::test_compatible_text_type_families_are_fine PASSED [ 69%]
+tests/unit/test_column_matching.py::test_compatible_text_type_families_are_fine PASSED [ 70%]
 tests/unit/test_column_matching.py::test_unk_1_never_excludes_a_column PASSED [ 70%]
-tests/unit/test_column_matching.py::test_dec_1_uses_min_scale_of_the_pair_and_warns PASSED [ 70%]
+tests/unit/test_column_matching.py::test_dec_1_uses_min_scale_of_the_pair_and_warns PASSED [ 71%]
 tests/unit/test_column_matching.py::test_dec_1_same_scale_no_warning PASSED [ 71%]
 tests/unit/test_column_matching.py::test_ts_2_upgrade_when_precision_differs PASSED [ 71%]
 tests/unit/test_column_matching.py::test_no_ts_2_upgrade_when_precision_matches PASSED [ 72%]
 tests/unit/test_column_matching.py::test_str_2_promotion_when_trim_or_case_insensitive_active PASSED [ 72%]
-tests/unit/test_column_matching.py::test_no_str_2_promotion_by_default PASSED [ 72%]
+tests/unit/test_column_matching.py::test_no_str_2_promotion_by_default PASSED [ 73%]
 tests/unit/test_config.py::test_loads_connections_and_tables PASSED      [ 73%]
-tests/unit/test_config.py::test_connection_as_mapping_with_dsn_key PASSED [ 73%]
+tests/unit/test_config.py::test_connection_as_mapping_with_dsn_key PASSED [ 74%]
 tests/unit/test_config.py::test_env_var_substitution_in_dsn PASSED       [ 74%]
-tests/unit/test_config.py::test_missing_env_var_raises_clear_error PASSED [ 74%]
+tests/unit/test_config.py::test_missing_env_var_raises_clear_error PASSED [ 75%]
 tests/unit/test_config.py::test_table_missing_source_or_target_raises PASSED [ 75%]
-tests/unit/test_config.py::test_key_columns_accept_comma_separated_string_or_list PASSED [ 75%]
+tests/unit/test_config.py::test_key_columns_accept_comma_separated_string_or_list PASSED [ 76%]
 tests/unit/test_config.py::test_missing_file_raises_table_diff_error PASSED [ 76%]
-tests/unit/test_config.py::test_defaults_applied_when_options_omitted PASSED [ 76%]
+tests/unit/test_config.py::test_defaults_applied_when_options_omitted PASSED [ 77%]
 tests/unit/test_hashdiff_core.py::TestIdenticalTables::test_identical_1000_row_tables_match PASSED [ 77%]
-tests/unit/test_hashdiff_core.py::TestMissingExtraChanged::test_delete_update_insert_are_all_reported_and_classified PASSED [ 77%]
+tests/unit/test_hashdiff_core.py::TestMissingExtraChanged::test_delete_update_insert_are_all_reported_and_classified PASSED [ 78%]
 tests/unit/test_hashdiff_core.py::TestCompositeKey::test_composite_key_tenant_and_order_id PASSED [ 78%]
 tests/unit/test_hashdiff_core.py::TestUuidKey::test_uuid_key_table_diffs_correctly PASSED [ 78%]
 tests/unit/test_hashdiff_core.py::TestNoPrimaryKey::test_no_pk_and_no_explicit_key_raises PASSED [ 79%]
@@ -300,13 +324,13 @@ tests/unit/test_hashdiff_core.py::TestMaxDiffRowsCap::test_diff_row_collection_i
 tests/unit/test_hashdiff_core.py::TestExplainDoesNotExecute::test_explain_returns_sql_without_running_against_source_or_target PASSED [ 80%]
 tests/unit/test_hashdiff_core.py::TestNonNumericKeySegmentationCoverage::test_target_only_row_below_source_min_with_text_key PASSED [ 81%]
 tests/unit/test_hashdiff_core.py::TestNonNumericKeySegmentationCoverage::test_30k_text_keys_three_smallest_changed_reports_exactly_three PASSED [ 81%]
-tests/unit/test_hashdiff_core.py::TestWhereFiltering::test_where_excludes_rows_from_comparison_on_both_sides PASSED [ 81%]
+tests/unit/test_hashdiff_core.py::TestWhereFiltering::test_where_excludes_rows_from_comparison_on_both_sides PASSED [ 82%]
 tests/unit/test_hashdiff_core.py::TestWhereFiltering::test_where_source_and_where_target_can_differ_per_side PASSED [ 82%]
-tests/unit/test_hashdiff_core.py::TestWhereFiltering::test_duplicate_key_check_is_scoped_by_where_not_the_whole_table PASSED [ 82%]
+tests/unit/test_hashdiff_core.py::TestWhereFiltering::test_duplicate_key_check_is_scoped_by_where_not_the_whole_table PASSED [ 83%]
 tests/unit/test_joindiff_core.py::test_identical_tables_match PASSED     [ 83%]
-tests/unit/test_joindiff_core.py::test_missing_extra_and_changed_all_detected_in_one_query PASSED [ 83%]
+tests/unit/test_joindiff_core.py::test_missing_extra_and_changed_all_detected_in_one_query PASSED [ 84%]
 tests/unit/test_joindiff_core.py::test_algorithm_field_is_joindiff PASSED [ 84%]
-tests/unit/test_joindiff_core.py::test_where_filters_both_sides PASSED   [ 84%]
+tests/unit/test_joindiff_core.py::test_where_filters_both_sides PASSED   [ 85%]
 tests/unit/test_joindiff_core.py::test_max_diff_rows_caps_row_list_but_counts_stay_exact PASSED [ 85%]
 tests/unit/test_joindiff_core.py::test_all_rows_differ_client_stays_bounded PASSED [ 85%]
 tests/unit/test_normalisation.py::test_integer_types_pick_int_1 PASSED   [ 86%]
@@ -319,9 +343,9 @@ tests/unit/test_normalisation.py::test_date_picks_date_1 PASSED          [ 89%]
 tests/unit/test_normalisation.py::test_time_types_pick_time_1 PASSED     [ 89%]
 tests/unit/test_normalisation.py::test_timestamp_with_time_zone_picks_ts_1 PASSED [ 90%]
 tests/unit/test_normalisation.py::test_naive_timestamp_picks_ts_3 PASSED [ 90%]
-tests/unit/test_normalisation.py::test_bytea_picks_bin_1 PASSED          [ 90%]
+tests/unit/test_normalisation.py::test_bytea_picks_bin_1 PASSED          [ 91%]
 tests/unit/test_normalisation.py::test_json_types_pick_json_1 PASSED     [ 91%]
-tests/unit/test_normalisation.py::test_enum_sentinel_picks_enum_1 PASSED [ 91%]
+tests/unit/test_normalisation.py::test_enum_sentinel_picks_enum_1 PASSED [ 92%]
 tests/unit/test_normalisation.py::test_array_sentinel_picks_arr_1 PASSED [ 92%]
 tests/unit/test_normalisation.py::test_unmapped_type_falls_back_to_unk_1_and_never_raises PASSED [ 92%]
 tests/unit/test_normalisation.py::test_type_matching_is_case_insensitive PASSED [ 93%]
@@ -340,7 +364,7 @@ tests/unit/test_segmentation.py::test_segment_by_samples_balances_uuid_keys PASS
 tests/unit/test_segmentation.py::test_segment_numeric_range_bounded_mode_never_exceeds_parent_hi PASSED [ 99%]
 tests/unit/test_segmentation.py::test_segment_by_samples_handles_duplicate_sample_values PASSED [100%]
 
-======================= 211 passed in 88.96s (0:01:28) ========================
+======================= 214 passed in 74.90s (0:01:14) ========================
 ```
 
 ## Next milestone
