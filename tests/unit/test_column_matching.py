@@ -96,6 +96,45 @@ def test_dec_1_same_scale_no_warning():
     assert m.warnings == []
 
 
+def test_uuid_vs_text_is_compatible_and_forces_uuid_1_on_both_sides():
+    # spec §6.2: "A Postgres uuid against a Snowflake VARCHAR compares
+    # after UUID-1" -- Snowflake has no native uuid type, so its side
+    # reports plain text; this pairing must not be excluded as
+    # "incompatible types" the way, say, int-vs-text would be.
+    src = {"id": col("id", "uuid")}
+    tgt = {"id": col("id", "text")}
+    m = match_columns(src, tgt, ["id"])
+    assert m.matched == ["id"]
+    assert m.excluded == []
+    assert m.rule_overrides["id"] is NormalisationRule.UUID_1
+
+
+def test_uuid_vs_text_override_is_symmetric_regardless_of_which_side_is_native():
+    src = {"id": col("id", "text")}
+    tgt = {"id": col("id", "uuid")}
+    m = match_columns(src, tgt, ["id"])
+    assert m.matched == ["id"]
+    assert m.rule_overrides["id"] is NormalisationRule.UUID_1
+
+
+def test_uuid_vs_uuid_needs_no_override():
+    src = {"id": col("id", "uuid")}
+    tgt = {"id": col("id", "uuid")}
+    m = match_columns(src, tgt, ["id"])
+    assert m.matched == ["id"]
+    assert "id" not in m.rule_overrides
+
+
+def test_uuid_vs_non_string_non_uuid_still_excluded():
+    # The uuid/string exception must not swallow genuinely incompatible
+    # pairings -- uuid vs a numeric column stays excluded.
+    src = {"id": col("id", "uuid")}
+    tgt = {"id": col("id", "bigint")}
+    m = match_columns(src, tgt, ["id"])
+    assert m.matched == []
+    assert m.excluded == ["id"]
+
+
 def test_ts_2_upgrade_when_precision_differs():
     src = {"updated_at": col("updated_at", "timestamp with time zone", precision=6)}
     tgt = {"updated_at": col("updated_at", "timestamp with time zone", precision=0)}

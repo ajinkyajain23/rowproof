@@ -23,19 +23,38 @@ EXIT_MATCH = 0
 EXIT_DIFFERENT = 1
 EXIT_COULD_NOT_COMPARE = 2
 
+def _snowflake_factory():
+    # Imported lazily, not at module scope like Postgres/ClickHouse above
+    # — spec §3/§9: Snowflake support is an optional extra
+    # (`tablediff[snowflake]`) precisely because its driver is a "heavy
+    # dependency" a Postgres/ClickHouse-only install shouldn't be forced
+    # to carry. An eager top-level import would defeat that: it'd make
+    # `snowflake-connector-python` a hard dependency of the whole CLI,
+    # breaking every command for a user who installed the base package.
+    try:
+        from tablediff.connectors.snowflake import SnowflakeConnector
+    except ImportError as e:
+        raise TableDiffError(
+            "Snowflake support requires the optional extra -- install with "
+            "`pip install tablediff[snowflake]` (or `pipx install tablediff[snowflake]`)"
+        ) from e
+    return SnowflakeConnector()
+
+
 _CONNECTOR_FACTORIES = {
     "postgres": PostgresConnector,
     "postgresql": PostgresConnector,
     "clickhouse": ClickHouseConnector,
     "ch": ClickHouseConnector,
-    # "snowflake": ...    -- M3
+    "snowflake": _snowflake_factory,
+    "sf": _snowflake_factory,
 }
 
 
 def _make_connector(engine: str, verbose: bool):
     factory = _CONNECTOR_FACTORIES.get(engine)
     if factory is None:
-        supported = ", ".join(sorted(set(_CONNECTOR_FACTORIES) - {"postgresql", "ch"}))
+        supported = ", ".join(sorted(set(_CONNECTOR_FACTORIES) - {"postgresql", "ch", "sf"}))
         raise TableDiffError(f"unsupported engine '{engine}' (supported: {supported})")
     connector = factory()
     if verbose and hasattr(connector, "on_query"):

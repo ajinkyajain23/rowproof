@@ -57,6 +57,14 @@ def _families_compatible(src_rule: NormalisationRule, tgt_rule: NormalisationRul
     # rather than excluded, on either side.
     if src_rule is NormalisationRule.UNK_1 or tgt_rule is NormalisationRule.UNK_1:
         return True
+    # spec §6.2: "A Postgres uuid against a Snowflake VARCHAR compares
+    # after UUID-1" — a deliberate exception, since an engine with no
+    # native uuid type (Snowflake) has no way to report one; the uuid
+    # side and the plain-string side are compatible specifically because
+    # UUID-1's own canonical form (lower-case, hyphenated) is exactly
+    # what lets a text-stored uuid compare correctly against a native one.
+    if {_family(src_rule), _family(tgt_rule)} == {"uuid", "string"}:
+        return True
     return _family(src_rule) == _family(tgt_rule)
 
 
@@ -131,6 +139,17 @@ def match_columns(
             continue
 
         matched.append(name)
+
+        # UUID-1 (spec §6.2): when the pairing above was allowed through
+        # specifically because one side is uuid-family and the other is a
+        # compatible plain string (e.g. Snowflake VARCHAR, which has no
+        # native uuid type), force BOTH sides to render via UUID-1 — the
+        # native-uuid side already resolves to UUID-1 on its own, but the
+        # override makes that explicit and, critically, is what makes the
+        # text-stored side render lower-case/hyphenated too, rather than
+        # falling through to its own native STR-1/STR-2.
+        if (_family(src_rule) == "uuid") != (_family(tgt_rule) == "uuid"):
+            rule_overrides[name] = NormalisationRule.UUID_1
 
         # DEC-1: canonical scale is the MIN of both sides' declared scale
         # (spec §6.1/§6.2) — never trust either side alone.

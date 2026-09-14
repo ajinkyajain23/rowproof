@@ -17,6 +17,9 @@ import uuid
 import pytest
 
 from tablediff.connectors import _pgwire
+from tablediff.connectors._sfwire import ConnectionFailedError as SfConnectionFailedError
+from tablediff.connectors._sfwire import SfDsn, check_connection as sf_check_connection
+from tablediff.connectors._sfwire import parse_sf_dsn, run_query as sf_run_query
 
 ADMIN_DSN_URL = os.environ.get(
     "TABLEDIFF_TEST_PG_ADMIN_DSN", "postgres://postgres:postgres@127.0.0.1:5432/postgres"
@@ -24,6 +27,15 @@ ADMIN_DSN_URL = os.environ.get(
 HOST_PORT_USER_PW = os.environ.get(
     "TABLEDIFF_TEST_PG_BASE", "postgres:postgres@127.0.0.1:5432"
 )
+
+# spec §9/§13 M3: Snowflake, as an optional extra -- tests needing it (see
+# test_snowflake_real.py's own module docstring) SKIP rather than fail
+# when this isn't set, same pattern as ClickHouse's `_require_clickhouse`.
+SF_DSN_URL = os.environ.get("TABLEDIFF_TEST_SF_DSN", "")
+
+
+def _sf_dsn() -> SfDsn:
+    return parse_sf_dsn(SF_DSN_URL)
 
 
 def _admin_dsn():
@@ -70,3 +82,39 @@ def exec_sql(dsn_url: str, sql: str):
     """Test-only helper for DDL/seeding — NOT part of the Connector
     protocol (spec rule 0.5: connectors are read-only by construction)."""
     return _pgwire.run_query(_pgwire.parse_pg_dsn(dsn_url), sql)
+
+
+@pytest.fixture(scope="session")
+def _require_snowflake():
+    """SKIPS the requesting test/module when Snowflake isn't reachable
+    (same pattern as test_clickhouse_real.py's own `_require_clickhouse`)
+    — the rest of the suite must keep running and passing regardless. M3
+    is not being reported done while this is skipped. Session-scoped
+    (checked once, not per test) since it's a pure reachability probe with
+    no side effects to isolate between tests.
+    """
+    if not SF_DSN_URL:
+        pytest.skip(
+            "TABLEDIFF_TEST_SF_DSN is not set -- M3's Snowflake acceptance "
+            "tests cannot run here."
+        )
+    try:
+        sf_check_connection(_sf_dsn())
+    except SfConnectionFailedError as e:
+        pytest.skip(f"Snowflake is not reachable at the configured account ({e}).")
+
+
+@pytest.fixture
+def sf_schema(_require_snowflake):
+    """A freshly created, uniquely named schema inside the DSN's own
+    database, dropped after the test. Metadata-only DDL — costs no
+    warehouse compute/credits, unlike the row-level queries each test
+    itself runs (kept deliberately small — thousands of rows at most, not
+    millions, to protect a trial account's credits)."""
+    dsn = _sf_dsn()
+    name = "tablediff_test_" + uuid.uuid4().hex[:16]
+    sf_run_query(dsn, f'CREATE SCHEMA "{dsn.database}"."{name}"')
+    try:
+        yield name
+    finally:
+        sf_run_query(dsn, f'DROP SCHEMA IF EXISTS "{dsn.database}"."{name}"')

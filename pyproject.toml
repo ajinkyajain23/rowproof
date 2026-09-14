@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-snowflake = []          # snowflake-connector-python  (M3)
+snowflake = ["snowflake-connector-python>=3.6"]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4",
