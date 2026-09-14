@@ -143,6 +143,22 @@ def _with_where(sql: str, extra_where: str | None) -> str:
 _BYTE_ORDER_SAFE_COLLATIONS = {"c", "posix", "c.utf8", "c.utf-8", "ucs_basic"}
 
 
+def _random_order_expr(connector: Connector) -> str:
+    """`ORDER BY <this>` for drawing a random sample (_sample_sql, _bisect).
+    Postgres's `RANDOM()` is not standard SQL and not portable — ClickHouse
+    has no function by that name at all (`SELECT ... ORDER BY RANDOM()`
+    fails with "Function with name 'RANDOM' does not exist", confirmed
+    against a real server; its own equivalent is `rand()`, lowercase,
+    returning a plain UInt32). FakeConnector's sqlite backing understands
+    `RANDOM()` natively (it's one of the few spellings sqlite and Postgres
+    happen to share), so "fake" stays on the Postgres branch rather than
+    needing a third case.
+    """
+    if connector.engine == "clickhouse":
+        return "rand()"
+    return "RANDOM()"
+
+
 def _key_expr_for_ordering(
     connector: Connector, key_col: str, numeric: bool, native_type: str, collation: str | None
 ) -> str:
@@ -167,43 +183,60 @@ def _key_expr_for_ordering(
     are used for those, not a sampled sort order, so no such mismatch is
     possible there.
 
-    Three shapes for the rest:
+    Shapes, in order:
 
     * `uuid` — always the RAW column. uuid has its own native btree
       opclass and isn't a collatable type at all (`COLLATE` on a uuid
       expression is a Postgres error, not a no-op), so there is no
-      collation ambiguity to resolve in the first place.
-    * text-like with a `collation` this connector reports as already
-      byte-order-safe (`_BYTE_ORDER_SAFE_COLLATIONS` — Postgres's own "C"
-      and "POSIX", or the libc "C.UTF-8" locale this dev sandbox happens
-      to default to) — also the RAW column. Forcing `COLLATE "C"` here
-      would be correct but pointless: it's provably the same order the
-      column (and its PK index) already use, so comparing the raw column
-      keeps the index usable while losing nothing.
-    * anything else (an unrecognised or locale-aware collation — e.g. a
-      typical production `en_US.utf8`, or the `en-x-icu` this project's
-      own regression test uses — and a defensive fallback when a
-      connector doesn't report collation at all, `collation is None`) —
-      `col COLLATE "C"`, forced explicitly. This is the one case where a
-      real, unavoidable trade-off exists: guaranteeing one deterministic
-      order across bounds/sample/segment queries takes priority over the
-      index, so this accepts a sequential scan rather than risk the
-      silent-data-loss bug `clamp_to_range`/`assert_contiguous_coverage`
-      exist to prevent. Confirmed both ways with EXPLAIN against real
-      Postgres: a "C"/"C.UTF-8"-default column keeps its Index Scan; an
-      `en-x-icu` one falls back to a Seq Scan.
-
-    This bakes in Postgres-specific spellings (spec's Connector protocol
-    has no collation/type hook, M0 is Postgres-only, and the
-    FakeConnector's sqlite backing registers a matching "C" collation and
-    never reports a `collation` value, so its unit tests keep exercising
-    the forced-COLLATE shape — the safe default when unknown). Revisit
-    when a second engine needs this.
+      collation ambiguity to resolve in the first place. (True for
+      ClickHouse's UUID too — its comparison is always plain byte order,
+      never locale-aware.)
+    * `connector.engine == "clickhouse"` — always the RAW column. This
+      function's `COLLATE "C"` forcing exists purely to work around
+      Postgres's specific default-collation ambiguity (see below); spec's
+      other v1 engine, ClickHouse, has no per-column locale-aware default
+      collation concept at all — String/FixedString comparison is always
+      plain byte order unless a query opts into `ORDER BY ... COLLATE`
+      explicitly, which this project never does. Emitting Postgres's own
+      `COLLATE "C"` SYNTAX against ClickHouse isn't just unnecessary,
+      it's invalid SQL there (confirmed against a real server: `COLLATE`
+      on an arbitrary expression is a syntax error, not a no-op — unlike
+      Postgres, where it's at worst a redundant no-op). Deliberately an
+      opt-in check for the one engine this has actually been verified
+      against, not a catch-all `!= "postgres"` — `tests/unit/
+      fake_connector.py`'s FakeConnector reports `engine = "fake"`
+      specifically so its unit tests keep exercising this exact
+      forced-`COLLATE "C"` SQL shape against SQLite (see its own
+      docstring); widening this to "anything but Postgres" would silently
+      stop testing that, for no engine actually confirmed to need it.
+    * (Postgres only, from here) a `collation` this connector reports as
+      already byte-order-safe (`_BYTE_ORDER_SAFE_COLLATIONS` — Postgres's
+      own "C" and "POSIX", or the libc "C.UTF-8" locale this dev sandbox
+      happens to default to) — also the RAW column. Forcing `COLLATE "C"`
+      here would be correct but pointless: it's provably the same order
+      the column (and its PK index) already use, so comparing the raw
+      column keeps the index usable while losing nothing.
+    * anything else (an unrecognised or locale-aware Postgres collation —
+      e.g. a typical production `en_US.utf8` default (this project's own
+      docker-compose.yml Postgres image included — confirmed directly),
+      or the `en-x-icu` this project's own regression test uses — and a
+      defensive fallback when a connector doesn't report collation at
+      all, `collation is None`) — `col COLLATE "C"`, forced explicitly.
+      This is the one case where a real, unavoidable trade-off exists:
+      guaranteeing one deterministic order across bounds/sample/segment
+      queries takes priority over the index, so this accepts a sequential
+      scan rather than risk the silent-data-loss bug
+      `clamp_to_range`/`assert_contiguous_coverage` exist to prevent.
+      Confirmed both ways with EXPLAIN against real Postgres: a
+      "C"/"C.UTF-8"-default column keeps its Index Scan; an `en_US.utf8`
+      or `en-x-icu` one falls back to a Seq Scan.
     """
     q = connector.quote_identifier(key_col)
     if numeric:
         return q
     if native_type.strip().lower() == "uuid":
+        return q
+    if connector.engine == "clickhouse":
         return q
     if collation is not None and collation.strip().lower() in _BYTE_ORDER_SAFE_COLLATIONS:
         return q
@@ -214,14 +247,15 @@ def _bounds_key_expr(
     connector: Connector, key_col: str, numeric: bool, native_type: str, collation: str | None
 ) -> str:
     """Like `_key_expr_for_ordering`, but specifically for the MIN/MAX
-    bounds query, where uuid needs one further exception: Postgres has no
-    `MIN`/`MAX` *aggregate* registered for the uuid type at all (confirmed
-    against a real instance — `SELECT MIN(uuid_col)` fails with "function
-    min(uuid) does not exist"; this is despite uuid having full ordering
-    operators, which is exactly why the raw column works fine as a
-    *comparison* target in `_key_expr_for_ordering`'s segment predicates).
-    So the bounds query alone still needs the CAST-to-TEXT workaround for
-    uuid — MIN/MAX(text) is a real aggregate.
+    bounds query, where uuid needs one further exception — on Postgres
+    only: Postgres has no `MIN`/`MAX` *aggregate* registered for the uuid
+    type at all (confirmed against a real instance — `SELECT
+    MIN(uuid_col)` fails with "function min(uuid) does not exist"; this
+    is despite uuid having full ordering operators, which is exactly why
+    the raw column works fine as a *comparison* target in
+    `_key_expr_for_ordering`'s segment predicates). So the bounds query
+    alone still needs the CAST-to-TEXT workaround for uuid on Postgres —
+    MIN/MAX(text) is a real aggregate.
 
     That cast's ordering must still agree with the raw-column ordering
     `_key_expr_for_ordering` uses everywhere else, or the "true min" this
@@ -237,8 +271,15 @@ def _bounds_key_expr(
 
     Bounds runs once per side, not once per segment, so this one text
     cast is not on the hot path segmentation cares about.
+
+    ClickHouse needs none of this: it has a native `MIN`/`MAX(UUID)`
+    aggregate (confirmed against a real server), so the raw column is
+    both correct and sufficient there — and the Postgres workaround's
+    exact SQL (`CAST(... AS TEXT) COLLATE "C"`) is a ClickHouse syntax
+    error if applied anyway (same `COLLATE` issue as
+    `_key_expr_for_ordering`).
     """
-    if not numeric and native_type.strip().lower() == "uuid":
+    if connector.engine == "postgres" and not numeric and native_type.strip().lower() == "uuid":
         q = connector.quote_identifier(key_col)
         return f'CAST({q} AS TEXT) COLLATE "C"'
     return _key_expr_for_ordering(connector, key_col, numeric, native_type, collation)
@@ -275,7 +316,7 @@ def _sample_sql(
     )
     inner = f"SELECT {q} FROM {_quoted_table(connector, table)}"
     inner = _with_where(inner, extra_where)
-    inner = f"{inner} ORDER BY RANDOM() LIMIT {sample_cap}"
+    inner = f"{inner} ORDER BY {_random_order_expr(connector)} LIMIT {sample_cap}"
     # The random subset is drawn here (for a representative sample of the
     # distribution); it is then sorted server-side, under the exact same
     # ordering the segment WHERE clauses use, so the caller never needs to
@@ -470,7 +511,7 @@ def _bisect(plan: _Plan, segment: Segment, lo, hi) -> list[Segment]:
     )
     inner_sql = (
         f"SELECT {key_col} FROM {_quoted_table(plan.connector, plan.table)} "
-        f"WHERE {where} ORDER BY RANDOM() LIMIT {DEFAULT_SAMPLE_CAP}"
+        f"WHERE {where} ORDER BY {_random_order_expr(plan.connector)} LIMIT {DEFAULT_SAMPLE_CAP}"
     )
     sample_sql = f"SELECT {key_col} FROM ({inner_sql}) sampled ORDER BY {order_expr}"
     samples = [r[0] for r in plan.connector.query(sample_sql)]

@@ -218,3 +218,89 @@ class TestNullableAcrossEngines:
             key_columns=["id"],
         )
         assert result.is_match, result.row_diffs
+
+
+class TestClickHouseKeySegmentation:
+    """spec §9 M2: "segment translation for UInt keys" — core/hashdiff.py's
+    segment-and-bisect path (_key_expr_for_ordering / _bounds_key_expr) used
+    to hard-code Postgres-only SQL with no ClickHouse case at all: forcing
+    `COLLATE "C"` on any non-uuid text key (a syntax error in ClickHouse —
+    confirmed against a real server, not just reasoned through) and a
+    `CAST(... AS TEXT) COLLATE "C"` workaround for uuid MIN/MAX that
+    ClickHouse doesn't even need (it has a native MIN/MAX(UUID) aggregate,
+    unlike Postgres). These tests cover all three ClickHouse key shapes a
+    real migration's primary key is likely to be: UInt64 (already worked,
+    since numeric keys never touch that code path — kept here as a
+    regression test), String, and UUID."""
+
+    def _ch_conn_for(self, ch_database: str) -> ClickHouseConnector:
+        c = ClickHouseConnector()
+        c.connect(_ch_dsn_for_database(ch_database))
+        return c
+
+    def test_uint64_key_segments_and_matches(self, ch_database):
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.a (id UInt64, name String) ENGINE = MergeTree ORDER BY id")
+        run_query(
+            ch_dsn,
+            f"INSERT INTO `{ch_database}`.a SELECT number, 'row-' || toString(number) FROM numbers(20000)",
+        )
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b AS `{ch_database}`.a")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b SELECT * FROM `{ch_database}`.a")
+
+        source = self._ch_conn_for(ch_database)
+        target = self._ch_conn_for(ch_database)
+        result = hashdiff(
+            source, target,
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert result.is_match, result.row_diffs
+        assert result.source_count == 20000
+
+    def test_string_key_segments_and_matches(self, ch_database):
+        """Before the fix: errors with a ClickHouse syntax error on
+        `COLLATE "C"` — this table never even gets past the bounds query."""
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.a (id String, name String) ENGINE = MergeTree ORDER BY id")
+        run_query(
+            ch_dsn,
+            f"INSERT INTO `{ch_database}`.a SELECT 'k' || leftPad(toString(number), 8, '0'), 'row' "
+            "FROM numbers(3000)",
+        )
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b AS `{ch_database}`.a")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b SELECT * FROM `{ch_database}`.a")
+
+        source = self._ch_conn_for(ch_database)
+        target = self._ch_conn_for(ch_database)
+        result = hashdiff(
+            source, target,
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert result.is_match, result.row_diffs
+        assert result.source_count == 3000
+
+    def test_uuid_key_segments_and_matches(self, ch_database):
+        """Before the fix: errors on the bounds query's `CAST(... AS TEXT)
+        COLLATE "C"` uuid workaround — also a ClickHouse syntax error, and
+        also unnecessary there since ClickHouse has a native MIN/MAX(UUID)
+        aggregate Postgres lacks."""
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.a (id UUID, name String) ENGINE = MergeTree ORDER BY id")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.a SELECT generateUUIDv4(), 'row' FROM numbers(3000)")
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b AS `{ch_database}`.a")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b SELECT * FROM `{ch_database}`.a")
+
+        source = self._ch_conn_for(ch_database)
+        target = self._ch_conn_for(ch_database)
+        result = hashdiff(
+            source, target,
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, schema=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert result.is_match, result.row_diffs
+        assert result.source_count == 3000
