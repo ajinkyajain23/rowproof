@@ -1,0 +1,193 @@
+"""M2's REAL acceptance tests (spec §13 M2) — against an actual ClickHouse
+server, executing actual generated SQL. This is the test spec §5 calls
+non-negotiable ("add a cross-engine test that hashes the same fixture
+string on every engine and asserts equality") and the test spec §0 rule 3
+requires before M2 can be called done ("verify on real databases before
+calling a milestone done").
+
+*** THIS FILE CANNOT RUN IN THIS DEV ENVIRONMENT. ***
+No Docker daemon, no network access to install a ClickHouse server or
+client (apt/pip both blocked — see docs/DEV_ENVIRONMENT.md's ClickHouse
+section), no pre-installed binary, and the user's linked desktop hit an
+unrelated Windows-bridge bug when we tried that route too. The tests below
+are written exactly as they should run once a real server is reachable —
+point `TABLEDIFF_TEST_CH_DSN` at one (default assumes a local instance on
+the standard HTTP port) and this file collects and runs for real, no code
+changes needed. Until then, every test here is SKIPPED (not faked as
+passing, not silently ignored — see `_require_clickhouse` below, which
+prints exactly why every time) and M2's cross-engine acceptance criteria
+remain unverified. Do not report M2 done while this file's tests are
+skipped.
+"""
+
+from __future__ import annotations
+
+import os
+import uuid
+
+import pytest
+
+from tablediff.connectors import _pgwire
+from tablediff.connectors._chwire import ConnectionFailedError, check_connection, parse_ch_dsn, run_query
+from tablediff.connectors.clickhouse import ClickHouseConnector
+from tablediff.connectors.postgres import PostgresConnector
+from tablediff.core.hashdiff import diff as hashdiff
+from tablediff.core.models import TableRef
+
+CH_ADMIN_DSN_URL = os.environ.get("TABLEDIFF_TEST_CH_DSN", "clickhouse://default:@127.0.0.1:8123/default")
+PG_ADMIN_DSN_URL = os.environ.get(
+    "TABLEDIFF_TEST_PG_ADMIN_DSN", "postgres://postgres:postgres@127.0.0.1:5432/postgres"
+)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _require_clickhouse():
+    """Unlike conftest.py's `_require_postgres` (which pytest.exit's the
+    whole session — appropriate there, since Postgres is a firm
+    prerequisite this whole dev environment is expected to have), this
+    SKIPS just this module's tests when ClickHouse isn't reachable. M2 is
+    an in-progress milestone with a known, explained environment gap
+    (see module docstring) — the rest of the suite (158+ tests covering
+    M0/M1 and this milestone's own engine-agnostic unit tests) must keep
+    running and passing regardless.
+    """
+    try:
+        check_connection(parse_ch_dsn(CH_ADMIN_DSN_URL))
+    except ConnectionFailedError as e:
+        pytest.skip(
+            f"ClickHouse is not reachable at {CH_ADMIN_DSN_URL!r} in this environment "
+            f"({e}) — M2's real cross-engine acceptance tests cannot run here. See this "
+            f"file's module docstring. M2 is not being reported done while this is skipped."
+        )
+
+
+def _ch_conn() -> ClickHouseConnector:
+    c = ClickHouseConnector()
+    c.connect(CH_ADMIN_DSN_URL)
+    return c
+
+
+def _pg_conn() -> PostgresConnector:
+    c = PostgresConnector()
+    c.connect(PG_ADMIN_DSN_URL)
+    return c
+
+
+@pytest.fixture
+def ch_database():
+    dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+    name = "tablediff_test_" + uuid.uuid4().hex[:16]
+    run_query(dsn, f"CREATE DATABASE `{name}`")
+    try:
+        yield name
+    finally:
+        run_query(dsn, f"DROP DATABASE IF EXISTS `{name}`")
+
+
+@pytest.fixture
+def pg_database():
+    dsn = _pgwire.parse_pg_dsn(PG_ADMIN_DSN_URL)
+    name = "tablediff_test_" + uuid.uuid4().hex[:16]
+    _pgwire.run_query(dsn, f'CREATE DATABASE "{name}"')
+    try:
+        yield f"postgres://postgres:postgres@127.0.0.1:5432/{name}"
+    finally:
+        _pgwire.run_query(dsn, f'DROP DATABASE IF EXISTS "{name}"')
+
+
+class TestCrossEngineHashEqualityLive:
+    """spec §5's non-negotiable test, for real: the SAME fixture string,
+    hashed by each engine's ACTUAL generated SQL, must produce the SAME
+    64-bit integer."""
+
+    @pytest.mark.parametrize("fixture_string", [
+        "hello", "", "row-2", "12.50", "unicode: café ☃",
+    ])
+    def test_same_fixture_string_hashes_equal_on_both_engines(self, fixture_string, ch_database):
+        pg = _pg_conn()
+        ch = _ch_conn()
+        pg_lit = pg.quote_literal(fixture_string)
+        ch_lit = ch.quote_literal(fixture_string)
+        pg_value = pg.query(f"SELECT {pg.row_hash_expr([pg_lit])}")[0][0]
+        ch_value = ch.query(f"SELECT {ch.row_hash_expr([ch_lit])}")[0][0]
+        assert pg_value == ch_value, (
+            f"row_hash_expr disagreed between Postgres and ClickHouse for "
+            f"{fixture_string!r}: postgres={pg_value} clickhouse={ch_value}"
+        )
+
+
+class TestTs2AcrossEngines:
+    def test_timestamptz_vs_datetime_same_second_is_not_reported(self, pg_database, ch_database):
+        from .conftest import exec_sql
+
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, ts timestamptz(6))")
+        exec_sql(pg_database, "INSERT INTO a VALUES (1, '2024-03-01 10:00:00.654321+00')")
+
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b (id UInt64, ts DateTime) ENGINE = Memory")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b VALUES (1, '2024-03-01 10:00:00')")
+
+        source = PostgresConnector()
+        source.connect(pg_database)
+        target = ClickHouseConnector()
+        target.connect(f"clickhouse://default:@127.0.0.1:8123/{ch_database}")
+
+        result = hashdiff(
+            source, target,
+            TableRef(engine="postgres", database=pg_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert result.is_match, result.row_diffs
+        assert any(w.rule and w.rule.value == "TS-2" for w in result.warnings)
+
+
+class TestDecimalAcrossEngines:
+    def test_numeric_12_2_vs_decimal_12_4_compares_at_scale_2(self, pg_database, ch_database):
+        from .conftest import exec_sql
+
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, total numeric(12,2))")
+        exec_sql(pg_database, "INSERT INTO a VALUES (1, 12.50)")
+
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b (id UInt64, total Decimal(12,4)) ENGINE = Memory")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b VALUES (1, 12.5000)")
+
+        source = PostgresConnector()
+        source.connect(pg_database)
+        target = ClickHouseConnector()
+        target.connect(f"clickhouse://default:@127.0.0.1:8123/{ch_database}")
+
+        result = hashdiff(
+            source, target,
+            TableRef(engine="postgres", database=pg_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert result.is_match, result.row_diffs
+        assert any(w.rule and w.rule.value == "DEC-1" for w in result.warnings)
+
+
+class TestNullableAcrossEngines:
+    def test_clickhouse_nullable_string_null_equals_postgres_null(self, pg_database, ch_database):
+        from .conftest import exec_sql
+
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, name text)")
+        exec_sql(pg_database, "INSERT INTO a VALUES (1, NULL)")
+
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b (id UInt64, name Nullable(String)) ENGINE = Memory")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b VALUES (1, NULL)")
+
+        source = PostgresConnector()
+        source.connect(pg_database)
+        target = ClickHouseConnector()
+        target.connect(f"clickhouse://default:@127.0.0.1:8123/{ch_database}")
+
+        result = hashdiff(
+            source, target,
+            TableRef(engine="postgres", database=pg_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, table="b"),
+            key_columns=["id"],
+        )
+        assert result.is_match, result.row_diffs
