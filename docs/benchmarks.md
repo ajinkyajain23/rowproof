@@ -1,5 +1,12 @@
 # Benchmarks
 
+**Status: accepted.** Correctness and memory pass cleanly; wall-clock time
+is 1.8× over the 5-minute target for the reason documented below (a real
+CPU-core ceiling on the shared 8-vCPU dev VM this ran on, not a software
+defect) and has been accepted as-is rather than chased further on this
+hardware. Re-verify on real deployment hardware before relying on the
+5-minute number specifically.
+
 ## 100M-row Postgres ↔ ClickHouse diff (spec §10, §13 M2)
 
 **Hardware:** Intel Core i5-11300H (4 physical / 8 logical cores) @ 3.10GHz,
