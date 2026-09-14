@@ -1,11 +1,13 @@
-"""Postgres connector (spec §5). See _pgwire.py for the stand-in note on
-*how* it talks to Postgres — this class's public shape is exactly the
-`Connector` protocol regardless.
+"""Postgres connector (spec §5). See _pgwire.py for *how* it talks to
+Postgres — this class's public shape is exactly the `Connector` protocol
+regardless.
 """
 
 from __future__ import annotations
 
 from typing import Callable
+
+import psycopg
 
 from tablediff.connectors import _pgwire
 from tablediff.core.models import Column, NormalisationRule, NormaliseOptions, TableRef
@@ -20,28 +22,36 @@ class PostgresConnector:
     engine = "postgres"
 
     def __init__(self) -> None:
-        self._dsn: _pgwire.PgDsn | None = None
+        # One persistent connection for this side's whole lifetime (spec
+        # §5: "One connection per side. No connection pooling in v1.") —
+        # not a fresh connection per query, which measured ~17ms of pure
+        # reconnect overhead against a local Postgres and would blow the
+        # 100M-row/5-minute benchmark (spec §13 M2) several times over on
+        # its own across the thousands of per-segment queries a large
+        # diff issues.
+        self._conn: psycopg.Connection | None = None
         # Set by the CLI under --verbose (spec §5: "Every generated SQL
         # statement is logged at --verbose ... This is a feature.").
         self.on_query: Callable[[str], None] | None = None
 
     def connect(self, dsn: str) -> None:
         parsed = _pgwire.parse_pg_dsn(dsn)
-        _pgwire.check_connection(parsed)
-        self._dsn = parsed
+        self._conn = _pgwire.open_connection(parsed)
 
     def close(self) -> None:
-        self._dsn = None
+        if self._conn is not None:
+            _pgwire.close_connection(self._conn)
+            self._conn = None
 
-    def _require_dsn(self) -> _pgwire.PgDsn:
-        if self._dsn is None:
+    def _require_conn(self) -> psycopg.Connection:
+        if self._conn is None:
             raise RuntimeError("connect() must be called before use")
-        return self._dsn
+        return self._conn
 
     def query(self, sql: str, params: dict | None = None) -> list[tuple]:
         if self.on_query is not None:
             self.on_query(sql)
-        return _pgwire.run_query(self._require_dsn(), sql)
+        return _pgwire.run_query_on(self._require_conn(), sql)
 
     def get_schema(self, table: TableRef) -> list[Column]:
         schema = table.schema or "public"

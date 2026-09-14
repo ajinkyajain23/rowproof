@@ -1,13 +1,26 @@
 """ClickHouse wire access, via `clickhouse-connect` — the real spec §3
 driver.
 
-`ClickHouseConnector` in clickhouse.py calls only `run_query()` and
-`check_connection()` below, never clickhouse_connect directly. This
-module used to be a hand-rolled stdlib `urllib` HTTP client (see git
-history / docs/DEV_ENVIRONMENT.md for why); clickhouse-connect replaces
-that with the real driver, which speaks the same HTTP interface but also
-handles response decoding, per-engine type mapping, and connection re-use
-itself instead of this module doing it by hand.
+`ClickHouseConnector` in clickhouse.py calls only the functions below,
+never clickhouse_connect directly. This module used to be a hand-rolled
+stdlib `urllib` HTTP client (see git history / docs/DEV_ENVIRONMENT.md
+for why); clickhouse-connect replaces that with the real driver, which
+speaks the same HTTP interface but also handles response decoding,
+per-engine type mapping, and connection re-use itself instead of this
+module doing it by hand.
+
+Two query paths, matching two different needs (mirrors _pgwire.py's own
+split — see that module's docstring for the full performance rationale):
+
+* `open_client()` / `run_query_on()` / `close_client()` — a genuinely
+  persistent client, opened once by `connect()` and reused for every
+  query for the lifetime of a diff (spec §5: "One connection per side.
+  No connection pooling in v1."). Reconnecting per query measured at
+  ~20ms of pure overhead against a local ClickHouse — negligible for one
+  query, ruinous across the thousands a large diff issues.
+* `run_query()` / `check_connection()` — a one-shot query against a
+  fresh client, for stateless reachability probes and test-only admin
+  operations that have no diff-lifetime client to reuse.
 """
 
 from __future__ import annotations
@@ -17,6 +30,7 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
 import clickhouse_connect
+from clickhouse_connect.driver.client import Client
 from clickhouse_connect.driver.exceptions import ClickHouseError
 from clickhouse_connect.driver.exceptions import OperationalError as ChOperationalError
 
@@ -83,18 +97,14 @@ def _reraise_as_tablediff_error(e: Exception, sql: str) -> None:
         raise ConnectionFailedError(str(e)) from e
     if isinstance(e, ClickHouseError):
         raise QueryFailedError(str(e), sql) from e
-    raise
+    raise e
 
 
-def run_query(dsn: ChDsn, sql: str, timeout: float | None = 30.0) -> list[tuple]:
-    """Run `sql` against ClickHouse and return rows as tuples. Never
-    mutates `sql` (no FORMAT clause appended, no query rewriting) — the
-    exact text a caller built is the exact text sent, matching spec §5's
-    `--verbose`-reproducibility promise. One client per call, matching
-    spec §5 ("One connection per side. No connection pooling in v1.").
-    """
+def open_client(dsn: ChDsn, timeout: float | None = 10.0) -> Client:
+    """Open and return a single persistent client — the one this side of
+    a diff uses for every query until `close_client()`."""
     try:
-        client = clickhouse_connect.get_client(
+        return clickhouse_connect.get_client(
             host=dsn.host,
             port=dsn.port,
             username=dsn.user,
@@ -103,9 +113,22 @@ def run_query(dsn: ChDsn, sql: str, timeout: float | None = 30.0) -> list[tuple]
             connect_timeout=max(1, int(timeout)) if timeout else 10,
         )
     except Exception as e:  # noqa: BLE001 - re-raised as a typed tablediff error below
-        _reraise_as_tablediff_error(e, sql)
+        _reraise_as_tablediff_error(e, "<connect>")
         raise  # pragma: no cover - _reraise_as_tablediff_error always raises
 
+
+def close_client(client: Client) -> None:
+    client.close()
+
+
+def run_query_on(client: Client, sql: str, timeout: float | None = None) -> list[tuple]:
+    """Run `sql` on an already-open persistent client and return rows as
+    tuples. This is the hot path every per-segment query in a diff goes
+    through — no new client, no re-authentication. Never mutates `sql`
+    (no FORMAT clause appended, no query rewriting) — the exact text a
+    caller built is the exact text sent, matching spec §5's
+    `--verbose`-reproducibility promise.
+    """
     try:
         settings = {"max_execution_time": timeout} if timeout else None
         result = client.query(sql, settings=settings)
@@ -113,8 +136,6 @@ def run_query(dsn: ChDsn, sql: str, timeout: float | None = 30.0) -> list[tuple]
     except Exception as e:  # noqa: BLE001
         _reraise_as_tablediff_error(e, sql)
         raise  # pragma: no cover
-    finally:
-        client.close()
 
 
 def check_connection(dsn: ChDsn) -> None:
@@ -122,3 +143,18 @@ def check_connection(dsn: ChDsn) -> None:
         run_query(dsn, "SELECT 1")
     except QueryFailedError as e:
         raise ConnectionFailedError(str(e)) from e
+
+
+def run_query(dsn: ChDsn, sql: str, timeout: float | None = 30.0) -> list[tuple]:
+    """Open a fresh client, run `sql`, return rows as tuples, close.
+
+    A deliberate one-shot path — for `check_connection`'s stateless
+    reachability probes and test-only admin operations, never for the
+    diff hot path (see module docstring; `ClickHouseConnector.query()`
+    uses `run_query_on()` on its one persistent client instead).
+    """
+    client = open_client(dsn, timeout)
+    try:
+        return run_query_on(client, sql, timeout)
+    finally:
+        client.close()

@@ -565,20 +565,26 @@ class TestExplainExecutesNoDataQueries:
         exec_sql(pg_database, "INSERT INTO b SELECT * FROM a")
 
         captured_sql: list[str] = []
-        real_run_query = _pgwire.run_query
+        real_run_query_on = _pgwire.run_query_on
 
-        def spying_run_query(dsn, sql, timeout=60.0):
+        def spying_run_query_on(conn, sql, timeout=None):
             captured_sql.append(sql)
-            return real_run_query(dsn, sql, timeout)
+            return real_run_query_on(conn, sql, timeout)
 
         import tablediff.connectors._pgwire as pgwire_mod
 
-        pgwire_mod.run_query = spying_run_query
+        # PostgresConnector.query() runs every diff/explain query over one
+        # persistent connection via run_query_on() (see _pgwire.py's
+        # module docstring) — that's the hot path to spy on, not run_query
+        # (the separate one-shot path connect()'s own probes and test
+        # admin helpers use, which explain's actual query traffic never
+        # touches).
+        pgwire_mod.run_query_on = spying_run_query_on
         try:
             argv = ["explain", f"{pg_database}/a", f"{pg_database}/b", "--key", "id"]
             code = cli_main(argv)
         finally:
-            pgwire_mod.run_query = real_run_query
+            pgwire_mod.run_query_on = real_run_query_on
 
         captured_out = capsys.readouterr()
 
@@ -594,11 +600,14 @@ class TestExplainExecutesNoDataQueries:
         for sql in captured_sql:
             assert not sql.startswith(forbidden_prefixes), f"explain executed a data query: {sql}"
             assert "GROUP BY" not in sql, f"explain executed the uniqueness probe: {sql}"
-            # "SELECT 1" is connect()'s own health check, not part of the
-            # diff; information_schema lookups are the schema introspection
-            # explain legitimately needs (see comment above).
-            allowed = sql == "SELECT 1" or "information_schema" in sql
-            assert allowed, f"unexpected query during explain: {sql}"
+            # information_schema lookups are the schema introspection
+            # explain legitimately needs (see comment above). connect()
+            # itself no longer issues a "SELECT 1" health-check query —
+            # it opens one persistent connection directly and a failed
+            # open_connection() raises on its own — but the query traffic
+            # spied on here is only ever what explain() itself runs
+            # through that connection, so this stays a strict allow-list.
+            assert "information_schema" in sql, f"unexpected query during explain: {sql}"
 
 
 def _wait_for_postgres_ready(attempts: int = 20, delay: float = 0.25) -> None:

@@ -118,15 +118,28 @@ class ClickHouseConnector:
     engine = "clickhouse"
 
     def __init__(self) -> None:
+        # The parsed DSN is kept for metadata (_database_for) even once
+        # connected; the persistent client below is what every query
+        # actually runs against — one client for this side's whole
+        # lifetime (spec §5: "One connection per side. No connection
+        # pooling in v1."), not a fresh one per query, which measured
+        # ~20ms of pure reconnect overhead against a local ClickHouse and
+        # would blow the 100M-row/5-minute benchmark (spec §13 M2) many
+        # times over across the thousands of per-segment queries a large
+        # diff issues.
         self._dsn: _chwire.ChDsn | None = None
+        self._client = None
         self.on_query: Callable[[str], None] | None = None
 
     def connect(self, dsn: str) -> None:
         parsed = _chwire.parse_ch_dsn(dsn)
-        _chwire.check_connection(parsed)
+        self._client = _chwire.open_client(parsed)
         self._dsn = parsed
 
     def close(self) -> None:
+        if self._client is not None:
+            _chwire.close_client(self._client)
+            self._client = None
         self._dsn = None
 
     def _require_dsn(self) -> _chwire.ChDsn:
@@ -134,10 +147,15 @@ class ClickHouseConnector:
             raise RuntimeError("connect() must be called before use")
         return self._dsn
 
+    def _require_client(self):
+        if self._client is None:
+            raise RuntimeError("connect() must be called before use")
+        return self._client
+
     def query(self, sql: str, params: dict | None = None) -> list[tuple]:
         if self.on_query is not None:
             self.on_query(sql)
-        return _chwire.run_query(self._require_dsn(), sql)
+        return _chwire.run_query_on(self._require_client(), sql)
 
     def _database_for(self, table: TableRef) -> str:
         return table.schema or self._require_dsn().database
