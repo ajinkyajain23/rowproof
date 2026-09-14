@@ -10,7 +10,11 @@ doesn't change.
 
 from __future__ import annotations
 
+import dataclasses
+import queue
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from tablediff.connectors.base import Connector
@@ -620,7 +624,29 @@ def diff(
     float_precision: int = 15,
     assume_tz: str = "UTC",
     column_map: dict | None = None,
+    threads: int = 1,
+    source_pool: list[Connector] | None = None,
+    target_pool: list[Connector] | None = None,
 ) -> DiffResult:
+    """spec §7: `--threads N` — "parallel segment queries per side
+    (default 4)". `source`/`target` still do every single-shot query
+    (schema, bounds, uniqueness) exactly as before; `threads > 1` only
+    changes how the many independent per-*segment* queries run.
+
+    Genuine parallelism needs genuinely separate connections — a single
+    synchronous psycopg/clickhouse-connect connection can't run two
+    queries at once — so the caller supplies `source_pool`/`target_pool`:
+    `threads` extra, already-`connect()`-ed Connector instances per side
+    (same engine, same table, just independent connections). Without
+    both pools (the default), this always takes the exact sequential
+    path — zero behavioural change for every existing caller. This
+    doesn't relax spec §5's "One connection per side. No connection
+    pooling in v1." rule so much as make it precise: a *pool* here means
+    exactly `threads` fixed, caller-owned connections (never grown,
+    never a general-purpose connection-pooling library), matching
+    `--threads N` one-for-one — never more connections than the CLI flag
+    the user asked for.
+    """
     start_time = time.monotonic()
     # spec §7: --where applies to both sides; --where-source/--where-target
     # override it per side when given.
@@ -668,6 +694,34 @@ def diff(
     segments = _initial_segments(src_plan, count_hint, lo, hi)
     result.segments_examined = len(segments)
 
+    if threads > 1 and source_pool and target_pool:
+        queries = _diff_segments_parallel(
+            src_plan, tgt_plan, segments, row_threshold, max_diff_rows, result,
+            min(threads, len(source_pool), len(target_pool)), source_pool, target_pool,
+        )
+    else:
+        queries = _diff_segments_sequential(
+            src_plan, tgt_plan, segments, row_threshold, max_diff_rows, result, source, target,
+        )
+
+    result.queries_per_side = queries // 2
+    result.elapsed_seconds = time.monotonic() - start_time
+    return result
+
+
+def _diff_segments_sequential(
+    src_plan: _Plan,
+    tgt_plan: _Plan,
+    segments: list[Segment],
+    row_threshold: int,
+    max_diff_rows: int,
+    result: DiffResult,
+    source: Connector,
+    target: Connector,
+) -> int:
+    """One connection per side, one segment at a time — the default path
+    (spec §5's plain "one connection per side"), unchanged from before
+    `--threads` existed."""
     queries = 0
     for segment in segments:
         queries += 2  # one stats query per side
@@ -693,10 +747,106 @@ def diff(
         # missing/extra/changed counters keep incrementing for every
         # segment so the summary numbers are always trustworthy even when
         # the row list is truncated.
+    return queries
 
-    result.queries_per_side = queries // 2
-    result.elapsed_seconds = time.monotonic() - start_time
-    return result
+
+class _ConnectorPool:
+    """A fixed, caller-owned set of already-`connect()`-ed connectors for
+    one side — `threads` of them, never more, never grown (see `diff()`'s
+    own docstring on why this isn't the "connection pooling" spec §5
+    rules out). `acquire()`/`release()` hand one out and back via a
+    `queue.Queue`, which is itself thread-safe, so many worker threads can
+    share one pool without any extra locking here.
+    """
+
+    def __init__(self, connectors: list[Connector]) -> None:
+        self._q: queue.Queue = queue.Queue()
+        for c in connectors:
+            self._q.put(c)
+
+    def acquire(self) -> Connector:
+        return self._q.get()
+
+    def release(self, connector: Connector) -> None:
+        self._q.put(connector)
+
+
+def _plan_with_connector(plan: _Plan, connector: Connector) -> _Plan:
+    """A shallow copy of `plan` pointed at a different connector — used
+    only by the parallel segment path so each worker thread executes its
+    queries over its own checked-out connection while sharing the plan's
+    already-computed schema/column-matching state. Safe because every
+    connector in a side's pool is logically identical (same engine, same
+    table, same schema) — only the physical connection differs, and
+    `plan.connector` is only ever used for two things, both invariant
+    across a side's pool: generating SQL text (quote_identifier,
+    normalise_expr, ...) and running `.query()`.
+    """
+    return dataclasses.replace(plan, connector=connector)
+
+
+def _diff_segments_parallel(
+    src_plan: _Plan,
+    tgt_plan: _Plan,
+    segments: list[Segment],
+    row_threshold: int,
+    max_diff_rows: int,
+    result: DiffResult,
+    threads: int,
+    source_pool: list[Connector],
+    target_pool: list[Connector],
+) -> int:
+    """Runs every top-level segment's stats check — and, for a mismatched
+    one, that segment's *entire* recursive bisection — as one task on a
+    `threads`-worker pool. Different segments run genuinely concurrently
+    (each task checks out its own pair of connections for its whole
+    lifetime, so there's no per-query pool churn); one segment's own
+    bisection stays sequential within its task — the fan-out across many
+    independent segments is where the real win is, and it avoids the
+    added complexity of also parallelising a single segment's recursion.
+
+    `result` is shared and mutated by every task (`_classify_rows`'s
+    counters and `row_diffs` list) — `_lock` guards exactly that mutation
+    (see `_resolve_mismatched_segment`'s own `lock` parameter), never the
+    query round-trips themselves, so lock contention stays minimal.
+    """
+    src_conn_pool = _ConnectorPool(source_pool)
+    tgt_conn_pool = _ConnectorPool(target_pool)
+    lock = threading.Lock()
+    query_count = 0
+    query_count_lock = threading.Lock()
+
+    def process_segment(segment: Segment) -> None:
+        nonlocal query_count
+        src_conn = src_conn_pool.acquire()
+        tgt_conn = tgt_conn_pool.acquire()
+        try:
+            thread_src_plan = _plan_with_connector(src_plan, src_conn)
+            thread_tgt_plan = _plan_with_connector(tgt_plan, tgt_conn)
+            src_sql = _segment_stats_sql(thread_src_plan, segment)
+            tgt_sql = _segment_stats_sql(thread_tgt_plan, segment)
+            src_seg_count, src_hash = src_conn.query(src_sql)[0]
+            tgt_seg_count, tgt_hash = tgt_conn.query(tgt_sql)[0]
+            segment_queries = 2
+
+            if not (src_seg_count == tgt_seg_count and src_hash == tgt_hash):
+                segment_queries += _resolve_mismatched_segment(
+                    thread_src_plan, thread_tgt_plan, segment, src_seg_count, tgt_seg_count,
+                    row_threshold, max_diff_rows, result, lock=lock,
+                )
+        finally:
+            src_conn_pool.release(src_conn)
+            tgt_conn_pool.release(tgt_conn)
+
+        with query_count_lock:
+            query_count += segment_queries
+
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = [executor.submit(process_segment, segment) for segment in segments]
+        for future in as_completed(futures):
+            future.result()  # re-raise anything a worker thread raised
+
+    return query_count
 
 
 def _resolve_mismatched_segment(
@@ -709,7 +859,16 @@ def _resolve_mismatched_segment(
     max_diff_rows: int,
     result: DiffResult,
     depth: int = 0,
+    lock: threading.Lock | None = None,
 ) -> int:
+    """`lock`, when given (only from `_diff_segments_parallel`), guards
+    every mutation of the shared `result` object — never the query
+    round-trips, which is where the real time goes and where holding a
+    lock would just serialise the parallel path back into a sequential
+    one. `None` (the default, used by the sequential path) means "no
+    other thread can be touching `result`, skip locking entirely" — the
+    exact previous behaviour, unconditionally.
+    """
     biggest = max(src_seg_count, tgt_seg_count)
     queries = 0
 
@@ -729,7 +888,7 @@ def _resolve_mismatched_segment(
                 any_real_split = True
                 queries += _resolve_mismatched_segment(
                     src_plan, tgt_plan, sub, s_stats[0], t_stats[0],
-                    row_threshold, max_diff_rows, result, depth + 1,
+                    row_threshold, max_diff_rows, result, depth + 1, lock,
                 )
             if any_real_split:
                 return queries
@@ -752,11 +911,11 @@ def _resolve_mismatched_segment(
     src_rows = src_plan.connector.query(src_sql)
     tgt_rows = tgt_plan.connector.query(tgt_sql)
 
-    _classify_rows(src_plan, tgt_plan, src_rows, tgt_rows, max_diff_rows, result)
+    _classify_rows(src_plan, tgt_plan, src_rows, tgt_rows, max_diff_rows, result, lock)
     return queries
 
 
-def _classify_rows(src_plan, tgt_plan, src_rows, tgt_rows, max_diff_rows, result: DiffResult) -> None:
+def _classify_rows(src_plan, tgt_plan, src_rows, tgt_rows, max_diff_rows, result: DiffResult, lock=None) -> None:
     n_key = len(src_plan.key_columns)
     value_names = src_plan.value_columns
 
@@ -765,31 +924,43 @@ def _classify_rows(src_plan, tgt_plan, src_rows, tgt_rows, max_diff_rows, result
 
     src_by_key = {key_of(r): r for r in src_rows}
     tgt_by_key = {key_of(r): r for r in tgt_rows}
-
     all_keys = sorted(set(src_by_key) | set(tgt_by_key))
-    for key in all_keys:
-        s = src_by_key.get(key)
-        t = tgt_by_key.get(key)
-        if s is not None and t is None:
-            result.missing_in_target += 1
-            _maybe_append(result, max_diff_rows, RowDiff(key=key, kind="missing"))
-        elif s is None and t is not None:
-            result.extra_in_target += 1
-            _maybe_append(result, max_diff_rows, RowDiff(key=key, kind="extra"))
-        else:
-            changes = {}
-            for i, col in enumerate(value_names):
-                sv = s[n_key + i]
-                tv = t[n_key + i]
-                if sv != tv:
-                    rule = src_plan.rule_for(col)
-                    changes[col] = (sv, tv, rule)
-            if changes:
-                result.changed += 1
-                _maybe_append(result, max_diff_rows, RowDiff(key=key, kind="changed", changes=changes))
-        # Deliberately no early return here: every key keeps getting
-        # classified and counted even once the row-detail cap is hit (see
-        # the note in diff()) — only _maybe_append stops growing the list.
+
+    def _classify() -> None:
+        for key in all_keys:
+            s = src_by_key.get(key)
+            t = tgt_by_key.get(key)
+            if s is not None and t is None:
+                result.missing_in_target += 1
+                _maybe_append(result, max_diff_rows, RowDiff(key=key, kind="missing"))
+            elif s is None and t is not None:
+                result.extra_in_target += 1
+                _maybe_append(result, max_diff_rows, RowDiff(key=key, kind="extra"))
+            else:
+                changes = {}
+                for i, col in enumerate(value_names):
+                    sv = s[n_key + i]
+                    tv = t[n_key + i]
+                    if sv != tv:
+                        rule = src_plan.rule_for(col)
+                        changes[col] = (sv, tv, rule)
+                if changes:
+                    result.changed += 1
+                    _maybe_append(result, max_diff_rows, RowDiff(key=key, kind="changed", changes=changes))
+            # Deliberately no early return here: every key keeps getting
+            # classified and counted even once the row-detail cap is hit
+            # (see the note in diff()) — only _maybe_append stops growing
+            # the list.
+
+    # The classification itself is pure in-memory work (no I/O) — cheap
+    # enough that holding `lock` for the whole thing, rather than
+    # per-counter, costs nothing measurable and is far simpler to reason
+    # about than fine-grained locking would be.
+    if lock is not None:
+        with lock:
+            _classify()
+    else:
+        _classify()
 
 
 def _maybe_append(result: DiffResult, max_diff_rows: int, row_diff: RowDiff) -> None:

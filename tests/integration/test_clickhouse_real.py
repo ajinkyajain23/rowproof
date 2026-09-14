@@ -378,3 +378,33 @@ class TestClickHouseSpecificTypes:
         assert result.changed == 1
         changed_cols = set(result.row_diffs[0].changes)
         assert changed_cols == {"status", "tags", "meta", "label"}, result.row_diffs[0].changes
+
+
+class TestCliSupportsClickHouse:
+    """The CLI's connector factory used to have ClickHouse commented out
+    ("-- M2") -- `tablediff diff` itself, not just calling hashdiff()
+    directly, needs to actually support a ClickHouse source/target now
+    that M2 is real."""
+
+    def test_cli_diff_postgres_to_clickhouse_returns_exit_0_on_match(self, pg_database, ch_database, capsys):
+        from .conftest import exec_sql
+
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, name text)")
+        exec_sql(pg_database, "INSERT INTO a SELECT g, 'row-' || g FROM generate_series(1, 500) g")
+
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b (id UInt64, name String) ENGINE = MergeTree ORDER BY id")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b SELECT number, 'row-' || toString(number) FROM numbers(1, 500)")
+
+        admin = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        auth = admin.user if admin.password is None else f"{admin.user}:{admin.password}"
+        ch_url = f"clickhouse://{auth}@{admin.host}:{admin.port}/{ch_database}/b"
+
+        from tablediff.cli.main import main as cli_main
+
+        argv = ["diff", f"{pg_database}/a", ch_url, "--key", "id"]
+        code = cli_main(argv)
+        captured = capsys.readouterr()
+
+        assert code == 0, captured.err
+        assert "MATCH" in captured.out

@@ -81,7 +81,26 @@ def _connect_pair(args, sql_log: list[str] | None = None):
                 )
     source.connect(src_spec.connect_dsn)
     target.connect(tgt_spec.connect_dsn)
-    return source, target, src_spec.table_ref, tgt_spec.table_ref
+
+    # spec §7: `--threads N` — extra, already-connected connectors per
+    # side for core.hashdiff's parallel segment path (see its own
+    # docstring on why genuine parallelism needs genuine extra
+    # connections, and why this is still "one [fixed] connection per
+    # side" in spirit, not a general pool). `explain` never sets
+    # --threads, and `getattr` covers that instead of giving every
+    # subcommand's argparser a `--threads` flag it doesn't use.
+    threads = getattr(args, "threads", 1)
+    source_pool: list = []
+    target_pool: list = []
+    if threads > 1:
+        source_pool = [_make_connector(src_spec.engine, args.verbose) for _ in range(threads)]
+        target_pool = [_make_connector(tgt_spec.engine, args.verbose) for _ in range(threads)]
+        for connector in source_pool:
+            connector.connect(src_spec.connect_dsn)
+        for connector in target_pool:
+            connector.connect(tgt_spec.connect_dsn)
+
+    return source, target, src_spec.table_ref, tgt_spec.table_ref, source_pool, target_pool
 
 
 def resolve_algorithm(requested: str, args) -> str:
@@ -112,9 +131,11 @@ def _normalise_kwargs(args) -> dict:
 
 def cmd_diff(args) -> int:
     source = target = None
+    source_pool: list = []
+    target_pool: list = []
     try:
         sql_log: list[str] = []
-        source, target, source_ref, target_ref = _connect_pair(args, sql_log)
+        source, target, source_ref, target_ref, source_pool, target_pool = _connect_pair(args, sql_log)
         key_columns = _split_cols(args.key)
         columns = _split_cols(args.columns)
         exclude = _split_cols(args.exclude)
@@ -142,6 +163,9 @@ def cmd_diff(args) -> int:
                 where=args.where,
                 where_source=args.where_source,
                 where_target=args.where_target,
+                threads=args.threads,
+                source_pool=source_pool,
+                target_pool=target_pool,
                 **_normalise_kwargs(args),
             )
 
@@ -186,12 +210,14 @@ def cmd_diff(args) -> int:
             source.close()
         if target is not None:
             target.close()
+        for connector in (*source_pool, *target_pool):
+            connector.close()
 
 
 def cmd_explain(args) -> int:
     source = target = None
     try:
-        source, target, source_ref, target_ref = _connect_pair(args)
+        source, target, source_ref, target_ref, _source_pool, _target_pool = _connect_pair(args)
         key_columns = _split_cols(args.key)
         columns = _split_cols(args.columns)
         exclude = _split_cols(args.exclude)
@@ -357,6 +383,10 @@ def build_parser() -> argparse.ArgumentParser:
     diff_p = sub.add_parser("diff", help="verify two tables match")
     _add_common_args(diff_p)
     diff_p.add_argument("--algorithm", choices=["auto", "hashdiff", "joindiff"], default="auto")
+    diff_p.add_argument(
+        "--threads", type=int, default=4,
+        help="parallel segment queries per side, hashdiff only (default 4)",
+    )
     diff_p.add_argument("--row-threshold", type=int, default=1000)
     diff_p.add_argument("--max-diff-rows", type=int, default=10_000)
     diff_p.add_argument("--output", action="append", choices=["terminal", "json"], default=None)

@@ -726,3 +726,83 @@ class TestPasswordNeverLogged:
             # password really is `secret` right now, so the old DSN can't
             # authenticate to change it back.
             exec_sql(dsn_with_secret, "ALTER USER postgres WITH PASSWORD 'postgres'")
+
+
+class TestThreadedHashdiffMatchesSequential:
+    """spec §7's `--threads N` was defined in the CLI surface but never
+    implemented anywhere -- every segment query ran strictly sequentially,
+    one at a time. That alone was the dominant cost in a 100M-row/5-minute
+    benchmark run (spec §13 M2): ~167,000 sequential queries at tens of
+    milliseconds each is tens of minutes of pure serialisation, independent
+    of how fast any single query runs. core/hashdiff.py now runs
+    independent segments concurrently across a pool of extra connections
+    when threads > 1 -- these tests prove the parallel path produces
+    EXACTLY the same result as the sequential one, not just "runs faster."
+    """
+
+    def _make_pair_with_differences(self, pg_database):
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, name text, amount numeric(10,2))")
+        exec_sql(
+            pg_database,
+            "INSERT INTO a SELECT g, 'row-' || g, (g % 1000)::numeric / 10 "
+            "FROM generate_series(1, 200000) g",
+        )
+        exec_sql(pg_database, "CREATE TABLE b (LIKE a INCLUDING ALL)")
+        exec_sql(pg_database, "INSERT INTO b SELECT * FROM a")
+        # Scatter real differences across the whole key range so multiple
+        # segments are genuinely mismatched, not just one.
+        exec_sql(pg_database, "DELETE FROM b WHERE id % 4999 = 0")  # missing in target
+        exec_sql(pg_database, "UPDATE b SET amount = amount + 1 WHERE id % 3001 = 0")  # changed
+        exec_sql(
+            pg_database,
+            "INSERT INTO b SELECT g, 'extra-' || g, 9.99 FROM generate_series(200001, 200050) g",
+        )  # extra in target
+
+    def test_parallel_result_matches_sequential_result_exactly(self, pg_database):
+        self._make_pair_with_differences(pg_database)
+
+        seq_src, seq_tgt = connector_for(pg_database), connector_for(pg_database)
+        sequential = diff(
+            seq_src, seq_tgt, table_ref("db", "a"), table_ref("db", "b"),
+            key_columns=["id"], max_diff_rows=100_000,
+        )
+
+        par_src = connector_for(pg_database)
+        par_tgt = connector_for(pg_database)
+        src_pool = [connector_for(pg_database) for _ in range(4)]
+        tgt_pool = [connector_for(pg_database) for _ in range(4)]
+        try:
+            parallel = diff(
+                par_src, par_tgt, table_ref("db", "a"), table_ref("db", "b"),
+                key_columns=["id"], max_diff_rows=100_000,
+                threads=4, source_pool=src_pool, target_pool=tgt_pool,
+            )
+        finally:
+            for c in (*src_pool, *tgt_pool):
+                c.close()
+
+        assert parallel.source_count == sequential.source_count
+        assert parallel.target_count == sequential.target_count
+        assert parallel.missing_in_target == sequential.missing_in_target
+        assert parallel.extra_in_target == sequential.extra_in_target
+        assert parallel.changed == sequential.changed
+        assert parallel.truncated == sequential.truncated
+
+        def key_set(result):
+            return {(rd.kind, rd.key) for rd in result.row_diffs}
+
+        assert key_set(parallel) == key_set(sequential)
+
+    def test_threads_flag_without_a_pool_falls_back_to_sequential(self, pg_database):
+        """threads > 1 with no pool given (e.g. a connector that doesn't
+        support it) must not silently break -- it just runs sequentially,
+        per diff()'s own docstring."""
+        self._make_pair_with_differences(pg_database)
+        src, tgt = connector_for(pg_database), connector_for(pg_database)
+        result = diff(
+            src, tgt, table_ref("db", "a"), table_ref("db", "b"),
+            key_columns=["id"], max_diff_rows=100_000, threads=4,
+        )
+        assert result.missing_in_target > 0
+        assert result.changed > 0
+        assert result.extra_in_target > 0
