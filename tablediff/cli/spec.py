@@ -11,7 +11,7 @@ connectors/.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from tablediff.core.models import TableRef
 
@@ -57,6 +57,22 @@ def parse_source_spec(spec: str) -> ParsedSource:
         connect_dsn=connect_dsn,
         table_ref=TableRef(engine=engine, database=database, schema=schema, table=table),
     )
+
+
+def redact_dsn(dsn: str) -> str:
+    """spec §8.3: "both DSNs with secrets redacted" — used by the HTML
+    report's "Reproduce" section (and anywhere else a DSN might be shown
+    to a human). Generated SQL never embeds a DSN, so this is the only
+    place redaction is needed.
+    """
+    parts = urlsplit(dsn)
+    if not parts.password:
+        return dsn
+    # `.password` returns the netloc's own (possibly percent-encoded) text
+    # verbatim, not unquoted -- so it can be matched back into `.netloc`
+    # directly with no re-encoding step.
+    redacted_netloc = parts.netloc.replace(f":{parts.password}@", ":***@")
+    return urlunsplit((parts.scheme, redacted_netloc, parts.path, parts.query, parts.fragment))
 
 
 def resolve_source_spec(spec: str, connections: dict[str, str] | None) -> ParsedSource:

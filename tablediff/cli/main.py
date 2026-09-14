@@ -17,6 +17,7 @@ from tablediff.core.errors import TableDiffError
 from tablediff.core.hashdiff import diff as run_hashdiff
 from tablediff.core.hashdiff import explain as run_explain
 from tablediff.core.joindiff import diff as run_joindiff
+from tablediff.report.html import render_html
 
 EXIT_MATCH = 0
 EXIT_DIFFERENT = 1
@@ -212,6 +213,23 @@ def cmd_diff(args) -> int:
                         f.write(text)
                 else:
                     print(text)
+            elif fmt == "html":
+                # spec §8.3: DSNs shown in the report must be redacted --
+                # render_html does that itself (via cli.spec.redact_dsn),
+                # so the *raw* connect_dsn is passed through here, same as
+                # what actually connected (re-parsed rather than plumbed
+                # out of _connect_pair, since parse_source_spec is pure
+                # and cheap, and no other caller needs the DSN back).
+                html_text = render_html(
+                    result,
+                    source_dsn=parse_source_spec(args.source).connect_dsn,
+                    target_dsn=parse_source_spec(args.target).connect_dsn,
+                    sql_statements=sql_log,
+                )
+                if not args.html_path:
+                    raise TableDiffError("--output html requires --html-path PATH")
+                with open(args.html_path, "w", encoding="utf-8") as f:
+                    f.write(html_text)
 
         if args.fail_on == "none":
             return EXIT_MATCH
@@ -430,8 +448,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--sample-rows", type=int, metavar="N",
         help="diff a deterministic sample of approximately N rows",
     )
-    diff_p.add_argument("--output", action="append", choices=["terminal", "json"], default=None)
+    diff_p.add_argument("--output", action="append", choices=["terminal", "json", "html"], default=None)
     diff_p.add_argument("--json-path")
+    diff_p.add_argument("--html-path", help="file to write the HTML sign-off report to (spec §8.3)")
     diff_p.add_argument("--fail-on", choices=["none", "any", "count"], default="any")
     diff_p.set_defaults(func=cmd_diff)
 
