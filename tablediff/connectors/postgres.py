@@ -17,6 +17,11 @@ _INT_TYPES = {
     "smallserial", "serial", "bigserial",
 }
 
+# A `collation` this connector reports as already byte-order-safe —
+# Postgres's own "C" and "POSIX", or the libc "C.UTF-8" locale a plain
+# `initdb` sometimes defaults to. See `key_order_expr`'s docstring.
+_BYTE_ORDER_SAFE_COLLATIONS = {"c", "posix", "c.utf8", "c.utf-8", "ucs_basic"}
+
 
 class PostgresConnector:
     engine = "postgres"
@@ -106,8 +111,8 @@ class PostgresConnector:
                     # NULL for non-collatable types (int, uuid, ...); the
                     # column's actual declared/default collation name for
                     # text-like types (e.g. "C", "en-x-icu") otherwise. See
-                    # core/hashdiff.py's _key_expr_for_ordering for why
-                    # this matters for segmentation performance.
+                    # this class's own key_order_expr() for why this
+                    # matters for segmentation performance.
                     collation=collation_name,
                     scale=(int(scale) if scale is not None else None),
                     precision=(int(precision) if precision is not None else None),
@@ -357,6 +362,96 @@ class PostgresConnector:
         return (
             f"((sum(({row_hash_expr})::numeric) % {modulus} + {modulus}) % {modulus})"
         )
+
+    def key_order_expr(self, column: Column, numeric: bool) -> str:
+        """Left to a query's own default, a Postgres database's *default*
+        collation is usually locale-aware (case- and sometimes
+        punctuation-sensitive ordering), not a plain byte compare. If the
+        sample used to pick quantile boundaries sorted one way while a
+        segment's `WHERE lo <= key < hi` compared another way, a key
+        could satisfy neither boundary (silently dropped from every
+        segment) or both of two adjacent ones (double-counted) — exactly
+        the kind of gap that lets a real difference vanish for
+        mixed-case or non-ASCII text keys. Numeric keys never call this
+        (arithmetic bounds are used for those, not a sampled sort order,
+        so no such mismatch is possible there).
+
+        Three shapes:
+
+        * `uuid` — always the RAW column. uuid has its own native btree
+          opclass and isn't a collatable type at all (`COLLATE` on a
+          uuid expression is a Postgres error, not a no-op), so there is
+          no collation ambiguity to resolve in the first place.
+        * a `collation` this connector reports as already byte-order-safe
+          (`_BYTE_ORDER_SAFE_COLLATIONS`) — also the RAW column. Forcing
+          `COLLATE "C"` here would be correct but pointless: it's
+          provably the same order the column (and its PK index) already
+          use, so comparing the raw column keeps the index usable while
+          losing nothing.
+        * anything else (an unrecognised or locale-aware collation — e.g.
+          a typical production `en_US.utf8` default, or `en-x-icu` — and
+          a defensive fallback when `collation is None`) — `col COLLATE
+          "C"`, forced explicitly. This is the one case where a real,
+          unavoidable trade-off exists: guaranteeing one deterministic
+          order across bounds/sample/segment queries takes priority over
+          the index, so this accepts a sequential scan rather than risk
+          the silent-data-loss bug `core.segmentation.clamp_to_range`/
+          `assert_contiguous_coverage` exist to prevent. Confirmed both
+          ways with EXPLAIN against real Postgres: a "C"/"C.UTF-8"-default
+          column keeps its Index Scan; an `en_US.utf8` or `en-x-icu` one
+          falls back to a Seq Scan.
+        """
+        q = self.quote_identifier(column.name)
+        if numeric:
+            return q
+        if column.native_type.strip().lower() == "uuid":
+            return q
+        if column.collation is not None and column.collation.strip().lower() in _BYTE_ORDER_SAFE_COLLATIONS:
+            return q
+        return f'{q} COLLATE "C"'
+
+    def key_bounds_expr(self, column: Column, numeric: bool) -> str:
+        """uuid needs one further exception here: Postgres has no
+        `MIN`/`MAX` *aggregate* registered for the uuid type at all
+        (confirmed against a real instance — `SELECT MIN(uuid_col)`
+        fails with "function min(uuid) does not exist"; this is despite
+        uuid having full ordering operators, which is exactly why the
+        raw column works fine as a *comparison* target in
+        `key_order_expr`'s segment predicates). So the bounds query
+        alone still needs the CAST-to-TEXT workaround — MIN/MAX(text) is
+        a real aggregate.
+
+        That cast's ordering must still agree with the raw-column
+        ordering `key_order_expr` uses everywhere else, or the "true
+        min" this produces could disagree with what the segment
+        predicates actually cover (the same class of bug clamp_to_range
+        exists to prevent). Verified directly against Postgres: canonical
+        lowercase uuid text is fixed-width with hyphens at fixed
+        positions, so byte-order (`COLLATE "C"`) comparison of the text
+        form exactly matches uuid's own native byte comparison —
+        `ORDER BY v` and `ORDER BY v::text COLLATE "C"` produced
+        identical orderings for a mixed-case sample. This is the one
+        place that cast is added back; everywhere else uses the raw
+        column so segment queries can still use the PK index. Bounds
+        runs once per side, not once per segment, so this one text cast
+        is not on the hot path segmentation cares about.
+        """
+        if not numeric and column.native_type.strip().lower() == "uuid":
+            q = self.quote_identifier(column.name)
+            return f'CAST({q} AS TEXT) COLLATE "C"'
+        return self.key_order_expr(column, numeric)
+
+    def key_select_expr(self, column: Column) -> str:
+        # Postgres's OUTER JOIN already produces genuine NULL for an
+        # unmatched row regardless of the column's own NOT NULL
+        # constraint (a constraint on stored rows, not on join results —
+        # confirmed against a real server), so the raw column is always
+        # correct here.
+        return self.quote_identifier(column.name)
+
+    def sample_sql(self, table_sql: str, key_col: str, sample_cap: int) -> str:
+        q = self.quote_identifier(key_col)
+        return f"SELECT {q} FROM {table_sql} ORDER BY RANDOM() LIMIT {sample_cap}"
 
     def quote_identifier(self, name: str) -> str:
         return '"' + name.replace('"', '""') + '"'

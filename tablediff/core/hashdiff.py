@@ -144,161 +144,14 @@ def _with_where(sql: str, extra_where: str | None) -> str:
     return f"{sql} WHERE ({extra_where})"
 
 
-_BYTE_ORDER_SAFE_COLLATIONS = {"c", "posix", "c.utf8", "c.utf-8", "ucs_basic"}
-
-
-def _random_order_expr(connector: Connector) -> str:
-    """`ORDER BY <this>` for drawing a random sample (_sample_sql, _bisect).
-    Postgres's `RANDOM()` is not standard SQL and not portable — ClickHouse
-    has no function by that name at all (`SELECT ... ORDER BY RANDOM()`
-    fails with "Function with name 'RANDOM' does not exist", confirmed
-    against a real server; its own equivalent is `rand()`, lowercase,
-    returning a plain UInt32). FakeConnector's sqlite backing understands
-    `RANDOM()` natively (it's one of the few spellings sqlite and Postgres
-    happen to share), so "fake" stays on the Postgres branch rather than
-    needing a third case.
-    """
-    if connector.engine == "clickhouse":
-        return "rand()"
-    return "RANDOM()"
-
-
-def _key_expr_for_ordering(
-    connector: Connector, key_col: str, numeric: bool, native_type: str, collation: str | None
-) -> str:
-    """The one expression every bounds/sample/segment-filter query compares
-    a non-numeric key against, so they all agree on a single total order —
-    while comparing the RAW column whenever that's provably safe, since an
-    indexed range scan is the whole point of segmentation and wrapping the
-    column in an expression (a CAST, or a COLLATE that doesn't match the
-    index's own collation) stops the planner from using the PK index at
-    all (confirmed with EXPLAIN against a real Postgres).
-
-    Left to a query's own default, a database's *default* collation is
-    usually locale-aware (case- and sometimes punctuation-sensitive
-    ordering), not a plain byte compare. If the sample used to pick
-    quantile boundaries sorted one way while a segment's `WHERE lo <= key
-    < hi` compared another way, a key could satisfy neither boundary
-    (silently dropped from every segment) or both of two adjacent ones
-    (double-counted) — exactly the kind of gap that lets a real difference
-    vanish for mixed-case or non-ASCII text keys.
-
-    Numeric keys never call this — arithmetic bounds (min/max/midpoint)
-    are used for those, not a sampled sort order, so no such mismatch is
-    possible there.
-
-    Shapes, in order:
-
-    * `uuid` — always the RAW column. uuid has its own native btree
-      opclass and isn't a collatable type at all (`COLLATE` on a uuid
-      expression is a Postgres error, not a no-op), so there is no
-      collation ambiguity to resolve in the first place. (True for
-      ClickHouse's UUID too — its comparison is always plain byte order,
-      never locale-aware.)
-    * `connector.engine == "clickhouse"` — always the RAW column. This
-      function's `COLLATE "C"` forcing exists purely to work around
-      Postgres's specific default-collation ambiguity (see below); spec's
-      other v1 engine, ClickHouse, has no per-column locale-aware default
-      collation concept at all — String/FixedString comparison is always
-      plain byte order unless a query opts into `ORDER BY ... COLLATE`
-      explicitly, which this project never does. Emitting Postgres's own
-      `COLLATE "C"` SYNTAX against ClickHouse isn't just unnecessary,
-      it's invalid SQL there (confirmed against a real server: `COLLATE`
-      on an arbitrary expression is a syntax error, not a no-op — unlike
-      Postgres, where it's at worst a redundant no-op). Deliberately an
-      opt-in check for the one engine this has actually been verified
-      against, not a catch-all `!= "postgres"` — `tests/unit/
-      fake_connector.py`'s FakeConnector reports `engine = "fake"`
-      specifically so its unit tests keep exercising this exact
-      forced-`COLLATE "C"` SQL shape against SQLite (see its own
-      docstring); widening this to "anything but Postgres" would silently
-      stop testing that, for no engine actually confirmed to need it.
-    * (Postgres only, from here) a `collation` this connector reports as
-      already byte-order-safe (`_BYTE_ORDER_SAFE_COLLATIONS` — Postgres's
-      own "C" and "POSIX", or the libc "C.UTF-8" locale this dev sandbox
-      happens to default to) — also the RAW column. Forcing `COLLATE "C"`
-      here would be correct but pointless: it's provably the same order
-      the column (and its PK index) already use, so comparing the raw
-      column keeps the index usable while losing nothing.
-    * anything else (an unrecognised or locale-aware Postgres collation —
-      e.g. a typical production `en_US.utf8` default (this project's own
-      docker-compose.yml Postgres image included — confirmed directly),
-      or the `en-x-icu` this project's own regression test uses — and a
-      defensive fallback when a connector doesn't report collation at
-      all, `collation is None`) — `col COLLATE "C"`, forced explicitly.
-      This is the one case where a real, unavoidable trade-off exists:
-      guaranteeing one deterministic order across bounds/sample/segment
-      queries takes priority over the index, so this accepts a sequential
-      scan rather than risk the silent-data-loss bug
-      `clamp_to_range`/`assert_contiguous_coverage` exist to prevent.
-      Confirmed both ways with EXPLAIN against real Postgres: a
-      "C"/"C.UTF-8"-default column keeps its Index Scan; an `en_US.utf8`
-      or `en-x-icu` one falls back to a Seq Scan.
-    """
-    q = connector.quote_identifier(key_col)
-    if numeric:
-        return q
-    if native_type.strip().lower() == "uuid":
-        return q
-    if connector.engine == "clickhouse":
-        return q
-    if collation is not None and collation.strip().lower() in _BYTE_ORDER_SAFE_COLLATIONS:
-        return q
-    return f'{q} COLLATE "C"'
-
-
-def _bounds_key_expr(
-    connector: Connector, key_col: str, numeric: bool, native_type: str, collation: str | None
-) -> str:
-    """Like `_key_expr_for_ordering`, but specifically for the MIN/MAX
-    bounds query, where uuid needs one further exception — on Postgres
-    only: Postgres has no `MIN`/`MAX` *aggregate* registered for the uuid
-    type at all (confirmed against a real instance — `SELECT
-    MIN(uuid_col)` fails with "function min(uuid) does not exist"; this
-    is despite uuid having full ordering operators, which is exactly why
-    the raw column works fine as a *comparison* target in
-    `_key_expr_for_ordering`'s segment predicates). So the bounds query
-    alone still needs the CAST-to-TEXT workaround for uuid on Postgres —
-    MIN/MAX(text) is a real aggregate.
-
-    That cast's ordering must still agree with the raw-column ordering
-    `_key_expr_for_ordering` uses everywhere else, or the "true min" this
-    produces could disagree with what the segment predicates actually
-    cover (the same class of bug clamp_to_range exists to prevent).
-    Verified directly against Postgres: canonical lowercase uuid text is
-    fixed-width with hyphens at fixed positions, so byte-order
-    (`COLLATE "C"`) comparison of the text form exactly matches uuid's own
-    native byte comparison — `ORDER BY v` and `ORDER BY v::text COLLATE
-    "C"` produced identical orderings for a mixed-case sample. This is
-    the one place that cast is added back; everywhere else uses the raw
-    column so segment queries can still use the PK index.
-
-    Bounds runs once per side, not once per segment, so this one text
-    cast is not on the hot path segmentation cares about.
-
-    ClickHouse needs none of this: it has a native `MIN`/`MAX(UUID)`
-    aggregate (confirmed against a real server), so the raw column is
-    both correct and sufficient there — and the Postgres workaround's
-    exact SQL (`CAST(... AS TEXT) COLLATE "C"`) is a ClickHouse syntax
-    error if applied anyway (same `COLLATE` issue as
-    `_key_expr_for_ordering`).
-    """
-    if connector.engine == "postgres" and not numeric and native_type.strip().lower() == "uuid":
-        q = connector.quote_identifier(key_col)
-        return f'CAST({q} AS TEXT) COLLATE "C"'
-    return _key_expr_for_ordering(connector, key_col, numeric, native_type, collation)
-
-
 def _bounds_sql(
     connector: Connector,
     table: TableRef,
-    key_col: str,
+    key_column: Column,
     numeric: bool,
-    native_type: str,
-    collation: str | None,
     extra_where: str | None = None,
 ) -> str:
-    target = _bounds_key_expr(connector, key_col, numeric, native_type, collation)
+    target = connector.key_bounds_expr(key_column, numeric)
     sql = f"SELECT MIN({target}), MAX({target}), COUNT(*) FROM {_quoted_table(connector, table)}"
     return _with_where(sql, extra_where)
 
@@ -306,27 +159,23 @@ def _bounds_sql(
 def _sample_sql(
     connector: Connector,
     table: TableRef,
-    key_col: str,
+    key_column: Column,
     sample_cap: int,
-    native_type: str,
-    collation: str | None,
     extra_where: str | None = None,
 ) -> str:
     # Always used for non-numeric keys only (numeric segmentation never
     # samples) — see segment_by_samples's caller.
-    q = connector.quote_identifier(key_col)
-    order_expr = _key_expr_for_ordering(
-        connector, key_col, numeric=False, native_type=native_type, collation=collation
-    )
-    inner = f"SELECT {q} FROM {_quoted_table(connector, table)}"
-    inner = _with_where(inner, extra_where)
-    inner = f"{inner} ORDER BY {_random_order_expr(connector)} LIMIT {sample_cap}"
+    q = connector.quote_identifier(key_column.name)
+    order_expr = connector.key_order_expr(key_column, numeric=False)
+    table_sql = _with_where(_quoted_table(connector, table), extra_where)
+    inner = connector.sample_sql(table_sql, key_column.name, sample_cap)
     # The random subset is drawn here (for a representative sample of the
     # distribution); it is then sorted server-side, under the exact same
     # ordering the segment WHERE clauses use, so the caller never needs to
     # sort in Python — Python's str comparison isn't guaranteed to agree
-    # with SQL COLLATE "C" for every codepoint, and that's exactly the kind
-    # of disagreement that lets a key fall between two segments unnoticed.
+    # with a connector's own deterministic-order expression for every
+    # codepoint, and that's exactly the kind of disagreement that lets a
+    # key fall between two segments unnoticed.
     return f"SELECT {q} FROM ({inner}) sampled ORDER BY {order_expr}"
 
 
@@ -352,8 +201,7 @@ def _segment_where(
     key_columns: list[str],
     segment: Segment,
     numeric: bool,
-    native_type: str,
-    collation: str | None,
+    key_column: Column,
 ) -> str:
     """WHERE clause bounding the *first* key column to this segment's
     [lo, hi) range. (Composite keys are range-bounded on their leading
@@ -361,12 +209,12 @@ def _segment_where(
     along inside each row; this keeps segmentation simple while still
     correctly answering "do the tables match" for composite keys.)
 
-    Compares the same expression `_key_expr_for_ordering` builds for
+    Compares the same expression `key_order_expr()` builds for
     bounds/sampling — never a different one — so a key's segment
     membership here always agrees with the ordering that produced the
     segment boundaries in the first place.
     """
-    col = _key_expr_for_ordering(connector, key_columns[0], numeric, native_type, collation)
+    col = connector.key_order_expr(key_column, numeric)
     lo_lit = connector.quote_literal(segment.lo)
     if segment.hi is None:
         return f"{col} >= {lo_lit}"
@@ -381,9 +229,7 @@ def _combined_where(plan: _Plan, segment: Segment) -> str:
     as a parameter through every call site, so it can't be forgotten."""
     numeric = plan.key_rule in _NUMERIC_RULES
     key_col = _key_column(plan)
-    where = _segment_where(
-        plan.connector, plan.key_columns, segment, numeric, key_col.native_type, key_col.collation
-    )
+    where = _segment_where(plan.connector, plan.key_columns, segment, numeric, key_col)
     if plan.where:
         where = f"({where}) AND ({plan.where})"
     return where
@@ -442,10 +288,7 @@ def _validate_key_unique_side(plan: _Plan) -> None:
 def _get_bounds(plan: _Plan) -> tuple:
     numeric = plan.key_rule in _NUMERIC_RULES
     key_col = _key_column(plan)
-    sql = _bounds_sql(
-        plan.connector, plan.table, plan.key_columns[0], numeric,
-        key_col.native_type, key_col.collation, plan.where,
-    )
+    sql = _bounds_sql(plan.connector, plan.table, key_col, numeric, plan.where)
     rows = plan.connector.query(sql)
     lo, hi, count = rows[0]
     return lo, hi, (count or 0)
@@ -459,12 +302,10 @@ def _initial_segments(plan: _Plan, count: int, lo, hi) -> list[Segment]:
         segments = segment_numeric_range(lo, hi, num_segments)
     else:
         key_col = _key_column(plan)
-        sample_sql = _sample_sql(
-            plan.connector, plan.table, plan.key_columns[0], DEFAULT_SAMPLE_CAP,
-            key_col.native_type, key_col.collation, plan.where,
-        )
+        sample_sql = _sample_sql(plan.connector, plan.table, key_col, DEFAULT_SAMPLE_CAP, plan.where)
         # Already sorted server-side (see _sample_sql) — never re-sort in
-        # Python, which could silently disagree with the DB's COLLATE "C".
+        # Python, which could silently disagree with the connector's own
+        # deterministic-order expression.
         samples = [r[0] for r in plan.connector.query(sample_sql)]
         segments = segment_by_samples(samples, num_segments)
 
@@ -504,20 +345,16 @@ def _bisect(plan: _Plan, segment: Segment, lo, hi) -> list[Segment]:
     # within this segment's range instead (also scoped by plan.where, same
     # as every other query here — the sample must reflect only the rows
     # actually in scope for the comparison). Same two-step shape as
-    # _sample_sql: draw a random subset, then let the DB sort it under
-    # COLLATE "C" — never in Python (see _sample_sql's comment for why).
+    # _sample_sql: draw a random subset, then let the DB sort it under the
+    # connector's own deterministic-order expression — never in Python
+    # (see _sample_sql's comment for why).
     where = _combined_where(plan, segment)
     key_column = _key_column(plan)
-    key_col = plan.connector.quote_identifier(plan.key_columns[0])
-    order_expr = _key_expr_for_ordering(
-        plan.connector, plan.key_columns[0], numeric=False,
-        native_type=key_column.native_type, collation=key_column.collation,
-    )
-    inner_sql = (
-        f"SELECT {key_col} FROM {_quoted_table(plan.connector, plan.table)} "
-        f"WHERE {where} ORDER BY {_random_order_expr(plan.connector)} LIMIT {DEFAULT_SAMPLE_CAP}"
-    )
-    sample_sql = f"SELECT {key_col} FROM ({inner_sql}) sampled ORDER BY {order_expr}"
+    q = plan.connector.quote_identifier(plan.key_columns[0])
+    order_expr = plan.connector.key_order_expr(key_column, numeric=False)
+    table_sql = f"{_quoted_table(plan.connector, plan.table)} WHERE {where}"
+    inner_sql = plan.connector.sample_sql(table_sql, plan.key_columns[0], DEFAULT_SAMPLE_CAP)
+    sample_sql = f"SELECT {q} FROM ({inner_sql}) sampled ORDER BY {order_expr}"
     samples = [r[0] for r in plan.connector.query(sample_sql)]
     if not samples:
         # Nothing on this side to split on — bisection can't help; the
@@ -1009,13 +846,11 @@ def explain(
     statements = [
         "-- source: row-count and bounds",
         _bounds_sql(
-            source, source_table, src_plan.key_columns[0], src_plan.key_rule in _NUMERIC_RULES,
-            _key_column(src_plan).native_type, _key_column(src_plan).collation, src_plan.where,
+            source, source_table, _key_column(src_plan), src_plan.key_rule in _NUMERIC_RULES, src_plan.where,
         ),
         "-- target: row-count and bounds",
         _bounds_sql(
-            target, target_table, tgt_plan.key_columns[0], tgt_plan.key_rule in _NUMERIC_RULES,
-            _key_column(tgt_plan).native_type, _key_column(tgt_plan).collation, tgt_plan.where,
+            target, target_table, _key_column(tgt_plan), tgt_plan.key_rule in _NUMERIC_RULES, tgt_plan.where,
         ),
         "-- source: uniqueness check on the key",
         _duplicate_check_sql(source, source_table, src_plan.key_columns, src_plan.where),

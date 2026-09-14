@@ -66,10 +66,10 @@ class FakeConnector:
         self._conn = sqlite3.connect(":memory:")
         self._conn.create_function("tdhash", 1, _row_hash, deterministic=True)
         self._conn.create_aggregate("tdxor", 1, _XorAgg)
-        # core/hashdiff.py emits `COLLATE "C"` around every non-numeric key
-        # comparison (a fixed, locale-independent byte-order compare — see
-        # _key_expr_for_ordering's docstring) so bounds/sample/segment
-        # queries all agree on one ordering. Postgres ships "C" built in;
+        # key_order_expr() below emits `COLLATE "C"` around every
+        # non-numeric key comparison (a fixed, locale-independent
+        # byte-order compare) so bounds/sample/segment queries all agree
+        # on one ordering. Postgres ships "C" built in;
         # sqlite doesn't know that name unless something registers it, so
         # register one here that does the same plain byte-order compare
         # Python's default string comparison already gives us — this way
@@ -151,6 +151,33 @@ class FakeConnector:
 
     def aggregate_hash_expr(self, row_hash_expr: str) -> str:
         return f"tdxor({row_hash_expr})"
+
+    def key_order_expr(self, column: Column, numeric: bool) -> str:
+        q = self.quote_identifier(column.name)
+        if numeric:
+            return q
+        if column.native_type.strip().lower() == "uuid":
+            return q
+        # This fake's sqlite backing registers a "C" collation
+        # specifically so its unit tests keep exercising the real
+        # forced-`COLLATE "C"` SQL shape a locale-aware Postgres column
+        # would need (see connect()'s own comment) — `column.collation`
+        # is always None here (this fake never reports one), so this
+        # always takes that branch, matching PostgresConnector's own
+        # fallback for an unrecognised/absent collation.
+        return f'{q} COLLATE "C"'
+
+    def key_bounds_expr(self, column: Column, numeric: bool) -> str:
+        return self.key_order_expr(column, numeric)
+
+    def key_select_expr(self, column: Column) -> str:
+        return self.quote_identifier(column.name)
+
+    def sample_sql(self, table_sql: str, key_col: str, sample_cap: int) -> str:
+        # sqlite understands RANDOM() natively (one of the few spellings
+        # it and Postgres happen to share).
+        q = self.quote_identifier(key_col)
+        return f"SELECT {q} FROM {table_sql} ORDER BY RANDOM() LIMIT {sample_cap}"
 
     def quote_identifier(self, name: str) -> str:
         return '"' + name.replace('"', '""') + '"'

@@ -62,3 +62,59 @@ class Connector(Protocol):
     def quote_identifier(self, name: str) -> str: ...
 
     def quote_literal(self, value: object) -> str: ...
+
+    # Key-comparison SQL generators — spec §6.3's "Segment boundaries are
+    # computed in canonical form and translated back to native literals
+    # per engine by the connector," extended to cover *how* a key gets
+    # compared/selected in the first place. Added for M2 (real
+    # ClickHouse), for the same reason `options` was added to
+    # `normalise_expr` above: core/hashdiff.py's segment-and-bisect path
+    # and core/joindiff.py's outer join both need engine-specific SQL for
+    # a key column that spec §5's literal method list has no slot for,
+    # and every connector besides Postgres/ClickHouse can implement all
+    # four by just returning the raw quoted column — see
+    # `tests/unit/fake_connector.py`'s FakeConnector for the simplest
+    # real implementation.
+    def key_order_expr(self, column: Column, numeric: bool) -> str:
+        """SQL expression to compare/order by this key column when
+        building a bounds, segment-boundary WHERE, or sample ORDER BY
+        clause. Return the RAW quoted column whenever comparing it
+        directly is provably safe — an indexed range scan is the whole
+        point of segmentation, and wrapping the column in an expression
+        (a CAST, or a COLLATE that doesn't match the index's own
+        collation) can stop the query planner from using that index at
+        all. Force a different, deterministic comparison only when the
+        engine's own default ordering for this column isn't guaranteed
+        stable across separate bounds/sample/segment queries (e.g. a
+        Postgres text column under a locale-aware default collation)."""
+        ...
+
+    def key_bounds_expr(self, column: Column, numeric: bool) -> str:
+        """Like `key_order_expr`, but specifically for a MIN/MAX bounds
+        aggregate query — some engines need a different expression there
+        even when `key_order_expr`'s own expression is a fine ordinary
+        comparison target (e.g. an engine with no native MIN/MAX
+        aggregate for the key's type, needing a cast just for that
+        query). A connector with no such special case can simply return
+        `self.key_order_expr(column, numeric)`."""
+        ...
+
+    def key_select_expr(self, column: Column) -> str:
+        """SQL expression to SELECT this key column so that, after an
+        OUTER JOIN (core/joindiff.py), an unmatched row's side is
+        guaranteed to come back as genuine SQL NULL there — never a
+        type's default value. Most connectors can just return the raw
+        quoted column; only needed for an engine whose OUTER JOIN
+        implementation fills a non-Nullable column's unmatched side with
+        a default instead of NULL."""
+        ...
+
+    def sample_sql(self, table_sql: str, key_col: str, sample_cap: int) -> str:
+        """SQL selecting up to `sample_cap` random values of the
+        already-quoted `key_col` from `table_sql` (a FROM-clause-ready
+        table reference or parenthesised subquery, already filtered by
+        any `--where`) — used only for non-numeric key segmentation's
+        quantile-boundary sampling. The caller always re-sorts the
+        result with `key_order_expr()` itself; this method's own row
+        order is never trusted."""
+        ...

@@ -61,23 +61,15 @@ def _side_subquery_sql(plan: _Plan, alias: str) -> str:
     have a same-named column; inside here only one table is visible)."""
     connector = plan.connector
     quote = connector.quote_identifier
-    if connector.engine == "clickhouse":
-        # ClickHouse's FULL OUTER JOIN fills a non-Nullable key column's
-        # unmatched side with the type's default value (0 for UInt64),
-        # not SQL NULL — confirmed against a real server: `s.id IS NULL`/
-        # `t.id IS NULL` (missing-in-target/extra-in-target detection,
-        # `_JoinShape`'s whole `where_clause`, and `_join_sql`'s row
-        # classification) silently never fired for a genuinely
-        # unmatched row with a typical non-Nullable UInt64/Int64 primary
-        # key. Wrapping the key in `toNullable()` forces a real NULL for
-        # the unmatched side; it's a documented no-op for an
-        # already-Nullable key, so this is always safe to apply. Postgres
-        # needs no equivalent — its OUTER JOIN already produces genuine
-        # NULL for an unmatched row regardless of the column's NOT NULL
-        # constraint (a constraint on stored rows, not on join results).
-        key_select = [f"toNullable({quote(k)}) AS {quote(k)}" for k in plan.key_columns]
-    else:
-        key_select = [quote(k) for k in plan.key_columns]
+    # key_select_expr() (Connector protocol): most connectors just return
+    # the raw quoted column, but an engine whose OUTER JOIN fills a
+    # non-Nullable key's unmatched side with a type-default value instead
+    # of SQL NULL (ClickHouse does — see ClickHouseConnector.key_select_expr's
+    # own docstring) needs something more, or `s.id IS NULL`/`t.id IS
+    # NULL` (missing-in-target/extra-in-target detection, `_JoinShape`'s
+    # whole `where_clause`, and `_join_sql`'s row classification) never
+    # fires for a genuinely unmatched row.
+    key_select = [f"{connector.key_select_expr(plan.columns_by_name[k])} AS {quote(k)}" for k in plan.key_columns]
     value_select = [
         f"{connector.normalise_expr(plan.columns_by_name[c], plan.rule_for(c), plan.options)} AS {quote(c)}"
         for c in plan.value_columns

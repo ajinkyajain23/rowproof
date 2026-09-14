@@ -527,6 +527,45 @@ class ClickHouseConnector:
         modulus = "toInt256('18446744073709551616')"  # 2^64
         return f"((sum(toInt256({row_hash_expr})) % {modulus} + {modulus}) % {modulus})"
 
+    def key_order_expr(self, column: Column, numeric: bool) -> str:
+        """Always the RAW quoted column, for every key shape. ClickHouse
+        has no per-column locale-aware default collation concept at all
+        — String/FixedString comparison is always plain byte order
+        unless a query opts into `ORDER BY ... COLLATE` explicitly,
+        which this project never does — so there is no analogue of
+        Postgres's locale-ambiguity problem (see
+        `PostgresConnector.key_order_expr`'s docstring) to guard against
+        here. Emitting Postgres's own `COLLATE "C"` SYNTAX against
+        ClickHouse isn't just unnecessary, it's invalid SQL there
+        (confirmed against a real server: `COLLATE` on an arbitrary
+        expression is a syntax error, not a no-op)."""
+        return self.quote_identifier(column.name)
+
+    def key_bounds_expr(self, column: Column, numeric: bool) -> str:
+        # ClickHouse has a native MIN/MAX(UUID) aggregate (confirmed
+        # against a real server), unlike Postgres — no cast workaround
+        # needed for any key type in a bounds query.
+        return self.key_order_expr(column, numeric)
+
+    def key_select_expr(self, column: Column) -> str:
+        """`toNullable(...)` — ClickHouse's FULL OUTER JOIN fills a
+        non-Nullable key column's unmatched side with the type's default
+        value (`0` for UInt64), not SQL NULL — confirmed directly against
+        a real server. Without this, `s.key IS NULL`/`t.key IS NULL`
+        (core/joindiff.py's missing-in-target/extra-in-target detection,
+        the entire point of the outer join) silently never fires for any
+        typical non-Nullable primary key. `toNullable()` is a documented
+        no-op on an already-Nullable column, so this is always safe."""
+        return f"toNullable({self.quote_identifier(column.name)})"
+
+    def sample_sql(self, table_sql: str, key_col: str, sample_cap: int) -> str:
+        # Postgres's RANDOM() is not standard SQL and not portable —
+        # ClickHouse has no function by that name at all (confirmed
+        # against a real server: "Function with name 'RANDOM' does not
+        # exist"); its own equivalent is rand(), lowercase.
+        q = self.quote_identifier(key_col)
+        return f"SELECT {q} FROM {table_sql} ORDER BY rand() LIMIT {sample_cap}"
+
     def quote_identifier(self, name: str) -> str:
         return "`" + name.replace("`", "``") + "`"
 
