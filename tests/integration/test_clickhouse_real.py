@@ -604,3 +604,135 @@ class TestJoindiffAgainstRealClickHouse:
         assert code == 1, captured.err
         assert "joindiff" in captured.out
         assert "DIFFERENT" in captured.out
+
+
+class TestSpec64FixturesAcrossEngines:
+    """SPEC §6.4's fixture list, built as one Postgres table and one
+    ClickHouse table covering every canonical-form category it names --
+    timestamps (tz-aware), dates, decimals (incl. -0.00), floats (incl.
+    NaN/Infinity/-0.0 edge cases), strings (incl. unicode), nulls,
+    booleans, uuids, and arrays -- diffed cross-engine. Two tests: every
+    value equal -> MATCH; every comparable value changed -> each column
+    individually reported with the right rule.
+
+    Not literally reproduced here, each for a documented reason:
+
+    * A bare TIME column: Postgres `time` has no ClickHouse equivalent
+      at all (confirmed -- ClickHouseConnector's own TIME-1 comment) --
+      included anyway, to prove it's correctly *excluded* with a loud
+      warning (spec's "family incompatible: exclude column, report
+      loudly") rather than silently wrong or crashing.
+    * A NUL byte in text: Postgres itself refuses to store one --
+      already proven Postgres-side in test_m1_fixtures.py's
+      `TestStringFixtures::test_nul_byte_cannot_be_stored_in_postgres_text`;
+      not a cross-engine concern to re-prove.
+    * The extreme `'0001-01-01'`/`'9999-12-31 23:59:59'` timestamp
+      fixture: outside ClickHouse `DateTime64`'s supported year range,
+      so no valid ClickHouse column could ever hold it.
+    * Snowflake-specific UUID hyphen notes: M3 (Snowflake) hasn't
+      started.
+    * A dedicated `--trim`/`--case-insensitive` flag re-test: those
+      options are engine-agnostic, threaded through the same
+      `NormaliseOptions` object on both sides regardless of engine, and
+      already exercised per-engine in test_m1_fixtures.py -- a type/
+      value compatibility test doesn't need to re-prove a CLI flag.
+    """
+
+    _PG_DDL = """
+        CREATE TABLE a (
+            id bigint PRIMARY KEY,
+            ts_tz timestamptz(6), tm time(6), dt date,
+            amount numeric(12,2), amount_negzero numeric(12,2),
+            score float8, score_big float8, score_negzero float8, score_nan float8, score_inf float8,
+            name text, name_unicode text, flag boolean, uid uuid, tags integer[], note text
+        )
+    """
+    _CH_DDL = """
+        CREATE TABLE `{ch_database}`.b (
+            id UInt64,
+            ts_tz DateTime64(6), tm String, dt Date,
+            amount Decimal(12,2), amount_negzero Decimal(12,2),
+            score Float64, score_big Float64, score_negzero Float64, score_nan Float64, score_inf Float64,
+            name String, name_unicode String, flag Bool, uid UUID, tags Array(Int32), note Nullable(String)
+        ) ENGINE = MergeTree ORDER BY id
+    """
+
+    def _build(self, pg_database, ch_database, pg_row, ch_row):
+        from .conftest import exec_sql
+
+        exec_sql(pg_database, self._PG_DDL)
+        exec_sql(pg_database, f"INSERT INTO a VALUES {pg_row}")
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, self._CH_DDL.format(ch_database=ch_database))
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b VALUES {ch_row}")
+
+    def _diff(self, pg_database, ch_database):
+        source = PostgresConnector()
+        source.connect(pg_database)
+        target = ClickHouseConnector()
+        target.connect(_ch_dsn_for_database(ch_database))
+        return hashdiff(
+            source, target,
+            TableRef(engine="postgres", database=pg_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, table="b"),
+            key_columns=["id"], max_diff_rows=100,
+        )
+
+    def test_every_fixture_value_matches_across_engines(self, pg_database, ch_database):
+        pg_row = (
+            "(1, '2024-03-01 10:00:00+05:30', '13:45:07.123456', '2024-06-15', "
+            "12.50, -0.00, 0.1::float8 + 0.2::float8, 1e308, -0.0, 'NaN', 'Infinity', "
+            "'hello world', 'café ☃ 日本語', true, "
+            "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', ARRAY[1,2,3], NULL)"
+        )
+        ch_row = (
+            "(1, '2024-03-01 04:30:00.000000', '13:45:07.123456', '2024-06-15', "
+            "12.50, 0.00, 0.30000000000000004, 1e308, -0.0, nan, inf, "
+            "'hello world', 'café ☃ 日本語', true, "
+            "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', [1,2,3], NULL)"
+        )
+        self._build(pg_database, ch_database, pg_row, ch_row)
+        result = self._diff(pg_database, ch_database)
+        assert result.is_match, result.row_diffs
+        assert any(
+            w.column == "tm" and "incompatible types" in w.message for w in result.warnings
+        ), result.warnings
+
+    def test_one_value_changed_per_column_is_individually_reported(self, pg_database, ch_database):
+        pg_row = (
+            "(1, '2024-03-01 10:00:00+05:30', '13:45:07.123456', '2024-06-15', "
+            "12.50, -0.00, 0.1::float8 + 0.2::float8, 1e308, -0.0, 'NaN', 'Infinity', "
+            "'hello world', 'café ☃ 日本語', true, "
+            "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', ARRAY[1,2,3], NULL)"
+        )
+        # Every comparable column changed. score_nan is deliberately left
+        # alone (still NaN on both sides): spec's "NaN (both sides NaN ->
+        # equal)" is a MATCH rule, not something to invert here -- proven
+        # by its own absence from `changes` below, not a positive assertion.
+        ch_row = (
+            "(1, '2024-03-01 04:30:01.000000', '13:45:07.123456', '2024-06-16', "
+            "12.51, 0.01, 0.5, 9e307, 1.0, nan, '-inf', "
+            "'hello there', 'café ☃ 日本', false, "
+            "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', [1,2,4], 'not null anymore')"
+        )
+        self._build(pg_database, ch_database, pg_row, ch_row)
+        result = self._diff(pg_database, ch_database)
+
+        assert not result.is_match
+        assert result.changed == 1
+        changes = result.row_diffs[0].changes
+        expected_rules = {
+            "ts_tz": "TS-1", "dt": "DATE-1",
+            "amount": "DEC-1", "amount_negzero": "DEC-1",
+            "score": "FLT-1", "score_big": "FLT-1", "score_negzero": "FLT-1", "score_inf": "FLT-1",
+            "name": "STR-1", "name_unicode": "STR-1", "note": "STR-1",
+            "flag": "BOOL-1", "uid": "UUID-1", "tags": "ARR-1",
+        }
+        assert set(changes) == set(expected_rules), (set(changes), set(expected_rules))
+        for col, expected_rule in expected_rules.items():
+            _, _, rule = changes[col]
+            assert rule.value == expected_rule, f"{col}: expected {expected_rule}, got {rule}"
+        # tm stayed excluded (not compared, so never "changed"); score_nan
+        # stayed equal (both NaN) -- neither appears in `changes` at all.
+        assert "tm" not in changes
+        assert "score_nan" not in changes
