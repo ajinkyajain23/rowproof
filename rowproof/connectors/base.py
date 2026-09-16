@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from tablediff.core.models import Column, NormalisationRule, NormaliseOptions, TableRef
+from rowproof.core.models import Column, NormalisationRule, NormaliseOptions, TableRef
 
 
 class Connector(Protocol):

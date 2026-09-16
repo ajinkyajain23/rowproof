@@ -8,8 +8,8 @@ on real databases before calling a milestone done."
 
 from __future__ import annotations
 
-from tablediff.core.joindiff import diff as joindiff
-from tablediff.core.models import Algorithm, NormalisationRule
+from rowproof.core.joindiff import diff as joindiff
+from rowproof.core.models import Algorithm, NormalisationRule
 
 from .conftest import exec_sql
 from .test_m0_acceptance import connector_for, table_ref

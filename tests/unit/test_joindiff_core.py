@@ -11,8 +11,8 @@ both tables, passed as both `source` and `target`, exactly matching what
 "same database" means for joindiff in production.
 """
 
-from tablediff.core.joindiff import diff
-from tablediff.core.models import Column, TableRef
+from rowproof.core.joindiff import diff
+from rowproof.core.models import Column, TableRef
 from .fake_connector import FakeConnector
 
 COLUMNS = [
@@ -75,7 +75,7 @@ def test_algorithm_field_is_joindiff():
     conn.create_table("a", COLUMNS, ["id"], rows([1]))
     conn.create_table("b", COLUMNS, ["id"], rows([1]))
     result = diff(conn, conn, ref("a"), ref("b"), key_columns=["id"])
-    from tablediff.core.models import Algorithm
+    from rowproof.core.models import Algorithm
     assert result.algorithm is Algorithm.JOINDIFF
 
 

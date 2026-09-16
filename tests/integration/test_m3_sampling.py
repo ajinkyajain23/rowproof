@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from tablediff.cli.main import main as cli_main
+from rowproof.cli.main import main as cli_main
 
 from .conftest import exec_sql
 

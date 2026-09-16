@@ -16,22 +16,28 @@ import uuid
 
 import pytest
 
-from tablediff.connectors import _pgwire
-from tablediff.connectors._sfwire import ConnectionFailedError as SfConnectionFailedError
-from tablediff.connectors._sfwire import SfDsn, check_connection as sf_check_connection
-from tablediff.connectors._sfwire import parse_sf_dsn, run_query as sf_run_query
+from rowproof.connectors import _pgwire
+from rowproof.connectors._sfwire import ConnectionFailedError as SfConnectionFailedError
+from rowproof.connectors._sfwire import SfDsn, check_connection as sf_check_connection
+from rowproof.connectors._sfwire import parse_sf_dsn, run_query as sf_run_query
 
 ADMIN_DSN_URL = os.environ.get(
-    "TABLEDIFF_TEST_PG_ADMIN_DSN", "postgres://postgres:postgres@127.0.0.1:5432/postgres"
+    "ROWPROOF_TEST_PG_ADMIN_DSN", "postgres://postgres:postgres@127.0.0.1:5432/postgres"
 )
 HOST_PORT_USER_PW = os.environ.get(
-    "TABLEDIFF_TEST_PG_BASE", "postgres:postgres@127.0.0.1:5432"
+    "ROWPROOF_TEST_PG_BASE", "postgres:postgres@127.0.0.1:5432"
 )
 
 # spec §9/§13 M3: Snowflake, as an optional extra -- tests needing it (see
 # test_snowflake_real.py's own module docstring) SKIP rather than fail
 # when this isn't set, same pattern as ClickHouse's `_require_clickhouse`.
-SF_DSN_URL = os.environ.get("TABLEDIFF_TEST_SF_DSN", "")
+#
+# Falls back to the pre-rename TABLEDIFF_TEST_SF_DSN name (M4: renamed
+# tablediff -> rowproof) so a dev machine that already has the old name
+# set in its OS environment doesn't silently lose Snowflake test coverage
+# until someone remembers to re-set it under the new name -- this is a
+# one-time migration bridge, not a permanent dual-name API.
+SF_DSN_URL = os.environ.get("ROWPROOF_TEST_SF_DSN") or os.environ.get("TABLEDIFF_TEST_SF_DSN", "")
 
 
 def _sf_dsn() -> SfDsn:
@@ -62,7 +68,7 @@ def _require_postgres():
 def pg_database():
     """A freshly created, uniquely named database, dropped after the test.
     Yields its base DSN (no table suffix) — tests build TableRefs directly."""
-    name = "tablediff_test_" + uuid.uuid4().hex[:16]
+    name = "rowproof_test_" + uuid.uuid4().hex[:16]
     _run_admin(f'CREATE DATABASE "{name}"')
     dsn_url = f"postgres://{HOST_PORT_USER_PW}/{name}"
     try:
@@ -95,7 +101,7 @@ def _require_snowflake():
     """
     if not SF_DSN_URL:
         pytest.skip(
-            "TABLEDIFF_TEST_SF_DSN is not set -- M3's Snowflake acceptance "
+            "ROWPROOF_TEST_SF_DSN is not set -- M3's Snowflake acceptance "
             "tests cannot run here."
         )
     try:
@@ -112,7 +118,7 @@ def sf_schema(_require_snowflake):
     itself runs (kept deliberately small — thousands of rows at most, not
     millions, to protect a trial account's credits)."""
     dsn = _sf_dsn()
-    name = "tablediff_test_" + uuid.uuid4().hex[:16]
+    name = "rowproof_test_" + uuid.uuid4().hex[:16]
     sf_run_query(dsn, f'CREATE SCHEMA "{dsn.database}"."{name}"')
     try:
         yield name

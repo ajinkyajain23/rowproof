@@ -1,8 +1,8 @@
-# TableDiff — Implementation Spec
+# RowProof — Implementation Spec
 
 **Open-source CLI that verifies two tables match, across different database engines. Built for migrations and replication checks.**
 
-Working name: `tablediff` (placeholder — check PyPI and GitHub availability, rename before launch).
+Working name: `rowproof` (placeholder — check PyPI and GitHub availability, rename before launch).
 Licence: Apache 2.0 for everything in this spec. The paid tier (§12) is a separate, closed repo and is **not** part of v1.
 Target users: data engineers mid-migration (Postgres → ClickHouse, Snowflake → Databricks, warehouse → Iceberg) and teams running CDC replication.
 
@@ -40,7 +40,7 @@ The open-source `data-diff` package solved this and was sunset in May 2024. Its 
 
 ### v1 — in
 
-- `tablediff diff` between two tables, same or different engines
+- `rowproof diff` between two tables, same or different engines
 - Engines: **Postgres, ClickHouse, Snowflake** (in that order)
 - Two algorithms: **hashdiff** (cross-engine) and **joindiff** (same engine, same database)
 - Key-based comparison on a single or composite primary key
@@ -68,12 +68,12 @@ The open-source `data-diff` package solved this and was sunset in May 2024. Its 
 | Concern | Choice | Note |
 |---|---|---|
 | Language | Python 3.11+ | Adoption in data engineering; the heavy work is SQL anyway |
-| Packaging | `uv`, `pyproject.toml`, published to PyPI | `pipx install tablediff` must work |
+| Packaging | `uv`, `pyproject.toml`, published to PyPI | `pipx install rowproof` must work |
 | CLI | `typer` | |
 | Terminal output | `rich` | Tables, progress bars |
 | Postgres | `psycopg` (v3) | |
 | ClickHouse | `clickhouse-connect` | |
-| Snowflake | `snowflake-connector-python` | Heavy dependency; install as an extra: `tablediff[snowflake]` |
+| Snowflake | `snowflake-connector-python` | Heavy dependency; install as an extra: `rowproof[snowflake]` |
 | Config | YAML via `pyyaml` | |
 | HTML report | Jinja2 template, inline CSS, no external assets | Must open from a file share with no network |
 | Tests | `pytest`, `testcontainers` for Postgres and ClickHouse | Snowflake tests need credentials; mark as `integration` and skip by default |
@@ -82,7 +82,7 @@ The open-source `data-diff` package solved this and was sunset in May 2024. Its 
 ### Module layout
 
 ```
-tablediff/
+rowproof/
   cli/            typer commands, output rendering
   core/           PURE PYTHON. Algorithms, segmentation, normalisation rules, result model. No DB imports.
   connectors/
@@ -240,7 +240,7 @@ arrays:      {1,2,3} vs [1,2,3] ; empty array vs NULL
 ## 7. CLI
 
 ```
-tablediff diff SOURCE TARGET [options]
+rowproof diff SOURCE TARGET [options]
 
   SOURCE / TARGET: connection-string + table, e.g.
     postgres://user:pw@host:5432/db/public.orders
@@ -263,9 +263,9 @@ Options
   --verbose               log every generated SQL statement
   --fail-on none|any|count   (exit-code policy, default any)
 
-tablediff run CONFIG.yaml          run many table pairs; one report
-tablediff connections test NAME    check credentials
-tablediff explain SOURCE TARGET    print the SQL it would run, run nothing
+rowproof run CONFIG.yaml          run many table pairs; one report
+rowproof connections test NAME    check credentials
+rowproof explain SOURCE TARGET    print the SQL it would run, run nothing
 ```
 
 Exit codes: `0` tables match · `1` differences found · `2` could not compare (schema incompatible, missing key, connection failure). CI pipelines depend on this; document it on the README front page.
@@ -351,7 +351,7 @@ Fix whatever the first hundred users hit. Databricks and BigQuery connectors nex
 - Fixture suite passes on Postgres and ClickHouse in CI via testcontainers; Snowflake fixtures pass locally with credentials
 - 100M-row benchmark recorded in `docs/benchmarks.md` with hardware stated
 - README: install, one-command demo, exit codes, supported types table, "how it works" diagram, "we never write to your database" statement
-- `tablediff explain` output pasted into README as proof of transparency
+- `rowproof explain` output pasted into README as proof of transparency
 - PyPI package installs cleanly on Linux and macOS, Python 3.11–3.13
 - Launch posts drafted for Hacker News (Show HN), r/dataengineering, dbt Slack, LinkedIn
 
@@ -398,7 +398,7 @@ Verify on real databases before calling a milestone done.
 - [ ] `TIMESTAMP_NTZ` handled with TS-3 warning; `TIMESTAMP_TZ` converts to UTC
 - [ ] HTML report opens from a local file with no network and prints to A4 cleanly
 - [ ] `--sample 1%` selects the same rows on both sides (verify by diffing a sample against itself → MATCH)
-- [ ] `pipx install tablediff[snowflake]` works on a clean machine
+- [ ] `pipx install rowproof[snowflake]` works on a clean machine
 
 ### M4
 - [ ] Fresh user follows README and gets a diff result in under 5 minutes
@@ -409,7 +409,7 @@ Verify on real databases before calling a milestone done.
 
 ## 14. Launch checklist (week 6)
 
-- Show HN title: "Show HN: TableDiff – verify tables match across Postgres, ClickHouse and Snowflake" — lead with the problem, mention data-diff's sunset in the first comment, not the title
+- Show HN title: "Show HN: RowProof – verify tables match across Postgres, ClickHouse and Snowflake" — lead with the problem, mention data-diff's sunset in the first comment, not the title
 - r/dataengineering: post as a question-and-answer ("we kept getting bitten by timestamp precision during a Postgres→ClickHouse migration, so I built…")
 - dbt Community Slack `#tools-*` and `#advice-*` channels; Data Engineering Discord
 - LinkedIn: one post, the demo GIF, three sentences

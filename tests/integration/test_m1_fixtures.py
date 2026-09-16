@@ -17,11 +17,11 @@ import re
 
 import pytest
 
-from tablediff.connectors.postgres import PostgresConnector
-from tablediff.core.column_matching import match_columns
-from tablediff.core.hashdiff import diff
-from tablediff.core.models import NormalisationRule, NormaliseOptions, TableRef
-from tablediff.core.normalisation import pick_rule
+from rowproof.connectors.postgres import PostgresConnector
+from rowproof.core.column_matching import match_columns
+from rowproof.core.hashdiff import diff
+from rowproof.core.models import NormalisationRule, NormaliseOptions, TableRef
+from rowproof.core.normalisation import pick_rule
 
 from .conftest import exec_sql
 
@@ -252,7 +252,7 @@ class TestStringFixtures:
         assert render(pg_database, "t") == values
 
     def test_nul_byte_cannot_be_stored_in_postgres_text(self, pg_database):
-        # Documented Postgres limitation, not a tablediff one: the server
+        # Documented Postgres limitation, not a rowproof one: the server
         # itself refuses an embedded NUL in text (0x00 isn't representable
         # in its on-disk text format), so there's no normalise_expr
         # behaviour to prove here beyond "this never reaches SQL".

@@ -41,8 +41,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from tablediff.connectors import _sfwire
-from tablediff.core.models import Column, NormalisationRule, NormaliseOptions, TableRef
+from rowproof.connectors import _sfwire
+from rowproof.core.models import Column, NormalisationRule, NormaliseOptions, TableRef
 
 
 def _resolve(data_type: str, numeric_scale: int | None, datetime_precision: int | None) -> tuple[str, int | None, int | None]:

@@ -33,10 +33,10 @@ import os
 
 import pytest
 
-from tablediff.connectors import _pgwire
+from rowproof.connectors import _pgwire
 
 PG_ADMIN_DSN_URL = os.environ.get(
-    "TABLEDIFF_TEST_PG_ADMIN_DSN", "postgres://postgres:postgres@127.0.0.1:5432/postgres"
+    "ROWPROOF_TEST_PG_ADMIN_DSN", "postgres://postgres:postgres@127.0.0.1:5432/postgres"
 )
 
 

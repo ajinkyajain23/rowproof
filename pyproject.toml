@@ -1,7 +1,7 @@
 [project]
-name = "tablediff"
+name = "rowproof"
 version = "0.1.0"
-description = "Verify two tables match, across different database engines."
+description = "Prove a database migration or replication didn't lose, add or change a single row."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -24,14 +24,14 @@ dev = [
 ]
 
 [project.scripts]
-tablediff = "tablediff.cli.main:main"
+rowproof = "rowproof.cli.main:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["tablediff*"]
+include = ["rowproof*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

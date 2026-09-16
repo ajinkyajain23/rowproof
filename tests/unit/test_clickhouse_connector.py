@@ -11,9 +11,9 @@ tests/integration/test_clickhouse_real.py are about instead.
 
 from __future__ import annotations
 
-from tablediff.connectors.clickhouse import ClickHouseConnector, _resolve, _unwrap
-from tablediff.core.models import NormaliseOptions, TableRef
-from tablediff.core.normalisation import pick_rule
+from rowproof.connectors.clickhouse import ClickHouseConnector, _resolve, _unwrap
+from rowproof.core.models import NormaliseOptions, TableRef
+from rowproof.core.normalisation import pick_rule
 
 
 class TestUnwrap:
@@ -152,7 +152,7 @@ class TestNormaliseExprShape:
     docstring)."""
 
     def test_int_1_wraps_null_check_when_nullable(self):
-        from tablediff.core.models import Column, NormalisationRule
+        from rowproof.core.models import Column, NormalisationRule
         c = ClickHouseConnector()
         col = Column(name="n", native_type="bigint", nullable=True, ordinal=1)
         expr = c.normalise_expr(col, NormalisationRule.INT_1, NormaliseOptions())

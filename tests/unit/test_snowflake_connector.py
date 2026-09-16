@@ -11,9 +11,9 @@ tests/integration/test_snowflake_real.py is about instead.
 
 from __future__ import annotations
 
-from tablediff.connectors.snowflake import SnowflakeConnector, _resolve
-from tablediff.core.models import Column, NormaliseOptions, TableRef
-from tablediff.core.normalisation import pick_rule
+from rowproof.connectors.snowflake import SnowflakeConnector, _resolve
+from rowproof.core.models import Column, NormaliseOptions, TableRef
+from rowproof.core.normalisation import pick_rule
 
 
 class TestResolve:
@@ -139,7 +139,7 @@ class TestNormaliseExprShape:
     tests/integration/test_snowflake_real.py."""
 
     def test_int_1_wraps_null_check_when_nullable(self):
-        from tablediff.core.models import NormalisationRule
+        from rowproof.core.models import NormalisationRule
 
         c = SnowflakeConnector()
         col = Column(name="n", native_type="bigint", nullable=True, ordinal=1)
@@ -149,7 +149,7 @@ class TestNormaliseExprShape:
         assert 'TO_VARCHAR("n")' in expr
 
     def test_variant_type_falls_through_to_to_varchar_fallback(self):
-        from tablediff.core.models import NormalisationRule
+        from rowproof.core.models import NormalisationRule
 
         c = SnowflakeConnector()
         col = Column(name="v", native_type="variant", nullable=False, ordinal=1)
@@ -157,7 +157,7 @@ class TestNormaliseExprShape:
         assert expr == 'TO_VARCHAR("v")'
 
     def test_uuid_1_reassembles_bare_32_char_hex_and_lowercases(self):
-        from tablediff.core.models import NormalisationRule
+        from rowproof.core.models import NormalisationRule
 
         c = SnowflakeConnector()
         col = Column(name="uid", native_type="text", nullable=False, ordinal=1)

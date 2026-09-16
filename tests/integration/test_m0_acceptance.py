@@ -14,11 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from tablediff.cli.main import main as cli_main
-from tablediff.connectors import _pgwire
-from tablediff.connectors.postgres import PostgresConnector
-from tablediff.core.hashdiff import diff
-from tablediff.core.models import TableRef
+from rowproof.cli.main import main as cli_main
+from rowproof.connectors import _pgwire
+from rowproof.connectors.postgres import PostgresConnector
+from rowproof.core.hashdiff import diff
+from rowproof.core.models import TableRef
 
 from .conftest import ADMIN_DSN_URL, exec_sql
 
@@ -36,7 +36,7 @@ def connector_for(dsn_url: str) -> PostgresConnector:
 class TestCliExitCodesAgainstRealPostgres:
     """The other tests below mostly call core.hashdiff.diff() directly so
     they can time the algorithm precisely and inspect DiffResult objects.
-    That leaves a real gap: it never proves the `tablediff` CLI *itself*
+    That leaves a real gap: it never proves the `rowproof` CLI *itself*
     returns the right process exit code for the ordinary (non-error) match
     and differences cases — only DiffResult.exit_code() was checked there,
     and only the error paths (exit 2) were previously driven through
@@ -459,7 +459,7 @@ class TestSegmentQueriesUsePkIndex:
     special collation declared), for both a uuid key and a text key."""
 
     def _segment_plan(self, dsn_url: str, table: str, key: str) -> str:
-        from tablediff.core.hashdiff import _build_plan, _get_bounds, _initial_segments, _segment_stats_sql
+        from rowproof.core.hashdiff import _build_plan, _get_bounds, _initial_segments, _segment_stats_sql
 
         conn = connector_for(dsn_url)
         ref = table_ref("db", table)
@@ -571,7 +571,7 @@ class TestExplainExecutesNoDataQueries:
             captured_sql.append(sql)
             return real_run_query_on(conn, sql, timeout)
 
-        import tablediff.connectors._pgwire as pgwire_mod
+        import rowproof.connectors._pgwire as pgwire_mod
 
         # PostgresConnector.query() runs every diff/explain query over one
         # persistent connection via run_query_on() (see _pgwire.py's
@@ -625,7 +625,7 @@ def _wait_for_postgres_ready(attempts: int = 20, delay: float = 0.25) -> None:
 class TestNetworkDropMidRun:
     def test_postgres_actually_killed_mid_run_is_a_clean_error_no_traceback(self, pg_database):
         """This does NOT simulate a failure — it really stops the Postgres
-        service while `tablediff diff` is running against it (a real
+        service while `rowproof diff` is running against it (a real
         subprocess, not an in-process call), so the CLI has to survive an
         actual dropped connection, not a mocked exception."""
         import subprocess
@@ -642,7 +642,7 @@ class TestNetworkDropMidRun:
         exec_sql(pg_database, "INSERT INTO b SELECT * FROM a")
 
         argv = [
-            sys.executable, "-u", "-m", "tablediff.cli.main", "diff",
+            sys.executable, "-u", "-m", "rowproof.cli.main", "diff",
             f"{pg_database}/a", f"{pg_database}/b", "--key", "id", "--verbose",
         ]
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -666,7 +666,7 @@ class TestNetworkDropMidRun:
             proc.kill()
             proc.wait(timeout=10)
             pytest.fail(
-                "tablediff finished before we could kill Postgres mid-run "
+                "rowproof finished before we could kill Postgres mid-run "
                 f"(saw {sql_lines_seen} [sql] lines; stderr so far: {''.join(consumed_stderr)!r})"
             )
 

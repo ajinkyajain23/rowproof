@@ -7,11 +7,11 @@ conditions; the CLI layer just catches them and picks the exit code.
 from __future__ import annotations
 
 
-class TableDiffError(Exception):
-    """Base class for all tablediff-raised errors."""
+class RowProofError(Exception):
+    """Base class for all rowproof-raised errors."""
 
 
-class NoPrimaryKeyError(TableDiffError):
+class NoPrimaryKeyError(RowProofError):
     def __init__(self, table_name: str):
         super().__init__(
             f"Table '{table_name}' has no primary key and no --key was given. "
@@ -20,7 +20,7 @@ class NoPrimaryKeyError(TableDiffError):
         self.table_name = table_name
 
 
-class NonUniqueKeyError(TableDiffError):
+class NonUniqueKeyError(RowProofError):
     def __init__(self, table_name: str, key_columns: list[str], duplicate_example: tuple):
         example = ", ".join(f"{c}={v!r}" for c, v in zip(key_columns, duplicate_example))
         super().__init__(
@@ -32,6 +32,6 @@ class NonUniqueKeyError(TableDiffError):
         self.duplicate_example = duplicate_example
 
 
-class IncompatibleSchemaError(TableDiffError):
+class IncompatibleSchemaError(RowProofError):
     def __init__(self, message: str):
         super().__init__(message)

@@ -5,8 +5,8 @@ scale/precision math) is verified against real Postgres in
 tests/integration/test_m1_fixtures.py per spec §6.4.
 """
 
-from tablediff.core.models import NormalisationRule
-from tablediff.core.normalisation import pick_rule
+from rowproof.core.models import NormalisationRule
+from rowproof.core.normalisation import pick_rule
 
 
 def test_integer_types_pick_int_1():

@@ -95,7 +95,7 @@ def _connect_kwargs(dsn: PgDsn, connect_timeout: float | None) -> dict:
 
 
 def _classify(e: Exception, sql: str, timeout: float | None) -> None:
-    """Re-raise a psycopg exception as the tablediff-typed error the rest
+    """Re-raise a psycopg exception as the rowproof-typed error the rest
     of the codebase expects. Shared by both the persistent-connection and
     one-shot query paths so the two stay classified identically."""
     if isinstance(e, psycopg.errors.QueryCanceled):

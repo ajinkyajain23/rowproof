@@ -1,4 +1,4 @@
-from tablediff.cli.spec import parse_source_spec
+from rowproof.cli.spec import parse_source_spec
 
 
 def test_parses_schema_and_table():

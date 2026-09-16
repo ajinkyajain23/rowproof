@@ -3,7 +3,7 @@
 **Status: M2 accepted with conditions** — the 5-minute benchmark target is an OPEN ITEM (see `docs/benchmarks.md`), not accepted or waived. Everything else, including every other post-acceptance review finding, is fixed and verified.
 
 Run against real Postgres 16 + ClickHouse 24.8 (Docker Desktop, this
-machine). Environment: `TABLEDIFF_TEST_CH_DSN=clickhouse://default:clickhouse@127.0.0.1:8123/default`.
+machine). Environment: `ROWPROOF_TEST_CH_DSN=clickhouse://default:clickhouse@127.0.0.1:8123/default`.
 
 ## SPEC §13 M2 acceptance criteria
 
@@ -53,7 +53,7 @@ one of its named criteria — but it's real evidence that "M2 done" from a
 test pass is not the same as "no more bugs," and is recorded here rather
 than left out. New `TestFloatAcrossEngines` covers it going forward.
 
-Also found, and now fixed (commit `3004ee9`): pointing `tablediff diff`
+Also found, and now fixed (commit `3004ee9`): pointing `rowproof diff`
 at two ClickHouse tables in the **same** database auto-selects `joindiff`
 (per spec §4.2's own routing rule — same engine, same connection), and
 `core/joindiff.py` had never been run against ClickHouse before. Three

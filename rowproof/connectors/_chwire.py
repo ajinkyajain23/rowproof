@@ -88,7 +88,7 @@ def parse_ch_dsn(dsn: str) -> ChDsn:
     )
 
 
-def _reraise_as_tablediff_error(e: Exception, sql: str) -> None:
+def _reraise_as_rowproof_error(e: Exception, sql: str) -> None:
     if isinstance(e, ChOperationalError):
         # A real transport-level failure: refused/unreachable host,
         # connection reset, DNS failure.
@@ -112,9 +112,9 @@ def open_client(dsn: ChDsn, timeout: float | None = 10.0) -> Client:
             database=dsn.database,
             connect_timeout=max(1, int(timeout)) if timeout else 10,
         )
-    except Exception as e:  # noqa: BLE001 - re-raised as a typed tablediff error below
-        _reraise_as_tablediff_error(e, "<connect>")
-        raise  # pragma: no cover - _reraise_as_tablediff_error always raises
+    except Exception as e:  # noqa: BLE001 - re-raised as a typed rowproof error below
+        _reraise_as_rowproof_error(e, "<connect>")
+        raise  # pragma: no cover - _reraise_as_rowproof_error always raises
 
 
 def close_client(client: Client) -> None:
@@ -134,7 +134,7 @@ def run_query_on(client: Client, sql: str, timeout: float | None = None) -> list
         result = client.query(sql, settings=settings)
         return [tuple(row) for row in result.result_rows]
     except Exception as e:  # noqa: BLE001
-        _reraise_as_tablediff_error(e, sql)
+        _reraise_as_rowproof_error(e, sql)
         raise  # pragma: no cover
 
 

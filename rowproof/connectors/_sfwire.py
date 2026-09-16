@@ -1,5 +1,5 @@
 """Snowflake wire access, via `snowflake-connector-python` — the real spec
-§3 driver (installed as the `tablediff[snowflake]` optional extra, per
+§3 driver (installed as the `rowproof[snowflake]` optional extra, per
 spec's own "heavy dependency" note).
 
 `SnowflakeConnector` in snowflake.py calls only the functions below, never
@@ -65,7 +65,7 @@ def parse_sf_dsn(dsn: str) -> SfDsn:
     )
 
 
-def _reraise_as_tablediff_error(e: Exception, sql: str) -> None:
+def _reraise_as_rowproof_error(e: Exception, sql: str) -> None:
     # DatabaseError covers both a genuinely unreachable account and bad
     # credentials (snowflake-connector-python raises DatabaseError, not a
     # transport-level exception, for a rejected login — confirmed against
@@ -106,9 +106,9 @@ def open_connection(dsn: SfDsn, timeout: float | None = 30.0):
             schema="PUBLIC",
             login_timeout=max(1, int(timeout)) if timeout else 30,
         )
-    except Exception as e:  # noqa: BLE001 - re-raised as a typed tablediff error below
-        _reraise_as_tablediff_error(e, "<connect>")
-        raise  # pragma: no cover - _reraise_as_tablediff_error always raises
+    except Exception as e:  # noqa: BLE001 - re-raised as a typed rowproof error below
+        _reraise_as_rowproof_error(e, "<connect>")
+        raise  # pragma: no cover - _reraise_as_rowproof_error always raises
 
 
 def close_connection(conn) -> None:
@@ -131,7 +131,7 @@ def run_query_on(conn, sql: str) -> list[tuple]:
         finally:
             cur.close()
     except Exception as e:  # noqa: BLE001
-        _reraise_as_tablediff_error(e, sql)
+        _reraise_as_rowproof_error(e, sql)
         raise  # pragma: no cover
 
 

@@ -21,7 +21,7 @@ import hashlib
 import sqlite3
 from dataclasses import dataclass, field
 
-from tablediff.core.models import Column, NormalisationRule, NormaliseOptions, TableRef
+from rowproof.core.models import Column, NormalisationRule, NormaliseOptions, TableRef
 
 
 def _row_hash(canonical: str) -> int:

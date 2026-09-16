@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import pytest
 
-from tablediff.connectors._sfwire import run_query
-from tablediff.connectors.postgres import PostgresConnector
-from tablediff.connectors.snowflake import SnowflakeConnector
-from tablediff.core.hashdiff import diff as hashdiff
-from tablediff.core.models import TableRef
+from rowproof.connectors._sfwire import run_query
+from rowproof.connectors.postgres import PostgresConnector
+from rowproof.connectors.snowflake import SnowflakeConnector
+from rowproof.core.hashdiff import diff as hashdiff
+from rowproof.core.models import TableRef
 
-from .conftest import _sf_dsn, exec_sql
+from .conftest import SF_DSN_URL, _sf_dsn, exec_sql
 
 pytestmark = pytest.mark.usefixtures("_require_snowflake")
 
@@ -58,12 +58,10 @@ class TestSpec64FixturesAcrossEnginesSnowflake:
         run_query(dsn, f'INSERT INTO "{dsn.database}"."{sf_schema}"."b" SELECT {sf_row}')
 
     def _diff(self, pg_database, sf_schema):
-        import os
-
         source = PostgresConnector()
         source.connect(pg_database)
         target = SnowflakeConnector()
-        target.connect(os.environ["TABLEDIFF_TEST_SF_DSN"])
+        target.connect(SF_DSN_URL)
         return hashdiff(
             source, target,
             TableRef(engine="postgres", database=pg_database, table="a"),

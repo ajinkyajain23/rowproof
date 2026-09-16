@@ -11,7 +11,7 @@ client (apt/pip both blocked — see docs/DEV_ENVIRONMENT.md's ClickHouse
 section), no pre-installed binary, and the user's linked desktop hit an
 unrelated Windows-bridge bug when we tried that route too. The tests below
 are written exactly as they should run once a real server is reachable —
-point `TABLEDIFF_TEST_CH_DSN` at one (default assumes a local instance on
+point `ROWPROOF_TEST_CH_DSN` at one (default assumes a local instance on
 the standard HTTP port) and this file collects and runs for real, no code
 changes needed. Until then, every test here is SKIPPED (not faked as
 passing, not silently ignored — see `_require_clickhouse` below, which
@@ -27,31 +27,31 @@ import uuid
 
 import pytest
 
-from tablediff.connectors import _pgwire
-from tablediff.connectors._chwire import ConnectionFailedError, check_connection, parse_ch_dsn, run_query
-from tablediff.connectors.clickhouse import ClickHouseConnector
-from tablediff.connectors.postgres import PostgresConnector
-from tablediff.core.hashdiff import diff as hashdiff
-from tablediff.core.joindiff import diff as joindiff
-from tablediff.core.models import TableRef
+from rowproof.connectors import _pgwire
+from rowproof.connectors._chwire import ConnectionFailedError, check_connection, parse_ch_dsn, run_query
+from rowproof.connectors.clickhouse import ClickHouseConnector
+from rowproof.connectors.postgres import PostgresConnector
+from rowproof.core.hashdiff import diff as hashdiff
+from rowproof.core.joindiff import diff as joindiff
+from rowproof.core.models import TableRef
 
 # Defaults match docker-compose.yml exactly (Postgres 16 on 5432,
 # ClickHouse 24.8 on 8123 with CLICKHOUSE_PASSWORD=clickhouse) — no env
 # vars needed when running against the Docker services this project's
-# docker-compose.yml starts. TABLEDIFF_TEST_CH_DSN / _PG_ADMIN_DSN still
+# docker-compose.yml starts. ROWPROOF_TEST_CH_DSN / _PG_ADMIN_DSN still
 # override for any other reachable instance.
 CH_ADMIN_DSN_URL = os.environ.get(
-    "TABLEDIFF_TEST_CH_DSN", "clickhouse://default:clickhouse@127.0.0.1:8123/default"
+    "ROWPROOF_TEST_CH_DSN", "clickhouse://default:clickhouse@127.0.0.1:8123/default"
 )
 PG_ADMIN_DSN_URL = os.environ.get(
-    "TABLEDIFF_TEST_PG_ADMIN_DSN", "postgres://postgres:postgres@127.0.0.1:5432/postgres"
+    "ROWPROOF_TEST_PG_ADMIN_DSN", "postgres://postgres:postgres@127.0.0.1:5432/postgres"
 )
 
 
 def _ch_dsn_for_database(database: str) -> str:
     """Build a DSN pointed at a specific database, reusing
     CH_ADMIN_DSN_URL's own host/port/credentials — never hard-coding them
-    — so a TABLEDIFF_TEST_CH_DSN override is honoured everywhere, not just
+    — so a ROWPROOF_TEST_CH_DSN override is honoured everywhere, not just
     for the admin connection."""
     admin = parse_ch_dsn(CH_ADMIN_DSN_URL)
     auth = admin.user if admin.password is None else f"{admin.user}:{admin.password}"
@@ -94,7 +94,7 @@ def _pg_conn() -> PostgresConnector:
 @pytest.fixture
 def ch_database():
     dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
-    name = "tablediff_test_" + uuid.uuid4().hex[:16]
+    name = "rowproof_test_" + uuid.uuid4().hex[:16]
     run_query(dsn, f"CREATE DATABASE `{name}`")
     try:
         yield name
@@ -105,7 +105,7 @@ def ch_database():
 @pytest.fixture
 def pg_database():
     dsn = _pgwire.parse_pg_dsn(PG_ADMIN_DSN_URL)
-    name = "tablediff_test_" + uuid.uuid4().hex[:16]
+    name = "rowproof_test_" + uuid.uuid4().hex[:16]
     _pgwire.run_query(dsn, f'CREATE DATABASE "{name}"')
     try:
         yield f"postgres://postgres:postgres@127.0.0.1:5432/{name}"
@@ -457,7 +457,7 @@ class TestClickHouseSpecificTypes:
 
 class TestCliSupportsClickHouse:
     """The CLI's connector factory used to have ClickHouse commented out
-    ("-- M2") -- `tablediff diff` itself, not just calling hashdiff()
+    ("-- M2") -- `rowproof diff` itself, not just calling hashdiff()
     directly, needs to actually support a ClickHouse source/target now
     that M2 is real."""
 
@@ -475,7 +475,7 @@ class TestCliSupportsClickHouse:
         auth = admin.user if admin.password is None else f"{admin.user}:{admin.password}"
         ch_url = f"clickhouse://{auth}@{admin.host}:{admin.port}/{ch_database}/b"
 
-        from tablediff.cli.main import main as cli_main
+        from rowproof.cli.main import main as cli_main
 
         argv = ["diff", f"{pg_database}/a", ch_url, "--key", "id"]
         code = cli_main(argv)
@@ -595,7 +595,7 @@ class TestJoindiffAgainstRealClickHouse:
         auth = admin.user if admin.password is None else f"{admin.user}:{admin.password}"
         base = f"clickhouse://{auth}@{admin.host}:{admin.port}/{ch_database}"
 
-        from tablediff.cli.main import main as cli_main
+        from rowproof.cli.main import main as cli_main
 
         argv = ["diff", f"{base}/a", f"{base}/b", "--key", "id"]
         code = cli_main(argv)

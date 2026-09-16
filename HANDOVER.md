@@ -1,6 +1,6 @@
-# Handover — tablediff
+# Handover — rowproof
 
-You are taking over the `tablediff` project. Read this file, then `SPEC.md`, before doing anything.
+You are taking over the `rowproof` project. Read this file, then `SPEC.md`, before doing anything.
 
 ## What this project is
 

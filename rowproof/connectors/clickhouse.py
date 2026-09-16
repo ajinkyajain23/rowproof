@@ -19,8 +19,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from tablediff.connectors import _chwire
-from tablediff.core.models import Column, NormalisationRule, NormaliseOptions, TableRef
+from rowproof.connectors import _chwire
+from rowproof.core.models import Column, NormalisationRule, NormaliseOptions, TableRef
 
 
 def _unwrap(raw_type: str) -> tuple[str, bool]:

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from tablediff.core.models import DiffResult, TableRef
+from rowproof.core.models import DiffResult, TableRef
 
 
 def _display(value):
@@ -97,6 +97,7 @@ def render_json(
 
     payload = {
         "schema_version": 1,
+        "tool": "rowproof",
         "source": result.source,
         "target": result.target,
         "key_columns": list(result.key_columns),

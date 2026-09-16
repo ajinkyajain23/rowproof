@@ -4,7 +4,7 @@ connect() calls ever see one), so this is only exercised where a DSN
 string itself gets shown to a user -- the HTML report's "Reproduce"
 metadata (spec SS8.3: "both DSNs with secrets redacted")."""
 
-from tablediff.cli.spec import redact_dsn
+from rowproof.cli.spec import redact_dsn
 
 
 def test_redacts_a_plain_password():

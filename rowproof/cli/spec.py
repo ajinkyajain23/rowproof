@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
-from tablediff.core.models import TableRef
+from rowproof.core.models import TableRef
 
 
 @dataclass(frozen=True)
@@ -78,7 +78,7 @@ def redact_dsn(dsn: str) -> str:
 def resolve_source_spec(spec: str, connections: dict[str, str] | None) -> ParsedSource:
     """spec §7: SOURCE/TARGET is either a full connection string, "or a
     named connection from the config file: prod_pg/public.orders" — used
-    by `tablediff run` (and `cli.main.cmd_diff`, so `tablediff diff` can
+    by `rowproof run` (and `cli.main.cmd_diff`, so `rowproof diff` can
     reference a config's connections too, once one is loaded). A named
     connection's own value is a bare DSN with no table (validated by
     config.load_config); this just splices the two together and reuses

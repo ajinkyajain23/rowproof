@@ -15,7 +15,7 @@ this benchmark as satisfying spec §13 M2's time criterion.
 **Hardware:** Intel Core i5-11300H (4 physical / 8 logical cores) @ 3.10GHz,
 16 GB RAM. Both Postgres 16 and ClickHouse 24.8 ran as Docker Desktop
 containers sharing one 8-vCPU / 7.65 GB Docker Desktop VM on that same
-laptop — i.e. the databases and the `tablediff` client itself all
+laptop — i.e. the databases and the `rowproof` client itself all
 contended for the same physical cores. This is deliberately closer to
 "a developer's laptop" than "a provisioned benchmark server" — genuinely
 modest hardware, not a favourable case.
@@ -26,7 +26,7 @@ amount numeric(12,2), created_at timestamptz`) and `bench_target`
 loaded with 100,000,000 rows of matching data, then 1,000 differences
 introduced on the ClickHouse side: 400 rows deleted (missing in target),
 300 rows' `amount` changed, 300 extra rows inserted beyond the source's
-id range. Diffed via the real CLI (`tablediff diff ... --key id`, JSON
+id range. Diffed via the real CLI (`rowproof diff ... --key id`, JSON
 output), not by calling `hashdiff.diff()` directly — an actual subprocess,
 measuring wall-clock time and the **client** process's peak RSS
 (`psutil`, sampled every 0.2s, including any child processes).
@@ -59,7 +59,7 @@ The first full run reported `changed: 4,586,252` (not 300) and took 88
 minutes. Both problems were tracked down and fixed rather than papered
 over:
 
-1. **A data-generation bug, not a tablediff bug.** The benchmark's own
+1. **A data-generation bug, not a rowproof bug.** The benchmark's own
    ClickHouse seed data computed `amount` via `toDecimal64(x / 100.0, 2)`
    — float64 division, which isn't exact for values like 29/100, so
    `toDecimal64()` (which *truncates*, not rounds) silently produced
@@ -68,7 +68,7 @@ over:
    touching the full dataset. Fixed by using exact decimal arithmetic
    (`toDecimal64(x, 4) / 100`) instead of a float divisor. This alone
    cut `queries_per_side` from 167,194 to 11,501 — almost all of the
-   original 88 minutes was tablediff correctly, expensively chasing
+   original 88 minutes was rowproof correctly, expensively chasing
    down millions of genuine (if unintended) differences.
 
 2. **`--threads` was documented (spec §7) but never implemented.**

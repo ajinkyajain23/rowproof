@@ -13,9 +13,9 @@ import uuid
 
 import pytest
 
-from tablediff.core.errors import NonUniqueKeyError, NoPrimaryKeyError
-from tablediff.core.hashdiff import diff
-from tablediff.core.models import Column, TableRef
+from rowproof.core.errors import NonUniqueKeyError, NoPrimaryKeyError
+from rowproof.core.hashdiff import diff
+from rowproof.core.models import Column, TableRef
 
 from .fake_connector import FakeConnector
 
@@ -185,7 +185,7 @@ class TestMaxDiffRowsCap:
 
 class TestExplainDoesNotExecute:
     def test_explain_returns_sql_without_running_against_source_or_target(self):
-        from tablediff.core.hashdiff import explain
+        from rowproof.core.hashdiff import explain
 
         rows = base_rows(10)
         src, tgt, ref = make_pair(rows, list(rows), INT_COLS)

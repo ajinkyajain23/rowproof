@@ -11,8 +11,8 @@ terminal/JSON renderers' own unit tests.
 
 from __future__ import annotations
 
-from tablediff.core.models import Algorithm, DiffResult, NormalisationRule, RowDiff, TableRef, Warning
-from tablediff.report.html import render_html
+from rowproof.core.models import Algorithm, DiffResult, NormalisationRule, RowDiff, TableRef, Warning
+from rowproof.report.html import render_html
 
 
 def _match_result() -> DiffResult:
@@ -114,8 +114,8 @@ def test_run_metadata_shows_who_when_and_version():
         generated_by="ci-runner",
     )
     assert "ci-runner" in html
-    import tablediff
-    assert tablediff.__version__ in html
+    import rowproof
+    assert rowproof.__version__ in html
 
 
 def test_sample_pct_is_surfaced_when_set():

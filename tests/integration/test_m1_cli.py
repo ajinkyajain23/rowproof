@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 
-from tablediff.cli.main import main as cli_main
+from rowproof.cli.main import main as cli_main
 
 from .conftest import exec_sql
 
@@ -42,7 +42,7 @@ class TestAlgorithmAutoSelection:
         import uuid
         from .conftest import HOST_PORT_USER_PW, _run_admin
 
-        name2 = "tablediff_test_" + uuid.uuid4().hex[:16]
+        name2 = "rowproof_test_" + uuid.uuid4().hex[:16]
         _run_admin(f'CREATE DATABASE "{name2}"')
         dsn2 = f"postgres://{HOST_PORT_USER_PW}/{name2}"
         try:

@@ -8,8 +8,10 @@ file proves that swap happens in the *display* layer only, on an exact
 match, never as a substring replace that could mangle a real value.
 """
 
-from tablediff.cli.render import render_json, render_terminal, _display
-from tablediff.core.models import Algorithm, DiffResult, NormalisationRule, RowDiff, TableRef
+import json
+
+from rowproof.cli.render import render_json, render_terminal, _display
+from rowproof.core.models import Algorithm, DiffResult, NormalisationRule, RowDiff, TableRef
 
 
 def test_display_maps_the_null_1_marker_to_null():
@@ -104,3 +106,18 @@ def test_json_carries_sample_pct_field():
     )
     payload = render_json(result)
     assert '"sample_pct": 2.5' in payload
+
+
+def test_json_carries_tool_name():
+    # M4 rename: JSON output identifies itself as "rowproof".
+    result = DiffResult(
+        source=TableRef(engine="postgres", database="db", table="a"),
+        target=TableRef(engine="postgres", database="db", table="b"),
+        key_columns=("id",),
+        algorithm=Algorithm.HASHDIFF,
+        source_count=50,
+        target_count=50,
+    )
+    payload = json.loads(render_json(result))
+    assert payload["tool"] == "rowproof"
+    assert payload["schema_version"] == 1

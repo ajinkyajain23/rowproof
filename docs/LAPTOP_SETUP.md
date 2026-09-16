@@ -36,7 +36,7 @@ This project was never a git repo in the sandbox (no remote to clone) —
 unzip the delivered archive instead:
 
 ```
-unzip tablediff_m2_wip.zip -d tablediff && cd tablediff
+unzip rowproof_m2_wip.zip -d rowproof && cd rowproof
 python3 -m venv .venv && source .venv/bin/activate   # or your usual venv tool
 pip install -e ".[dev]"
 pip install "psycopg[binary]>=3.1" clickhouse-connect typer rich testcontainers

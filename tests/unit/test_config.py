@@ -1,12 +1,12 @@
-"""Unit tests for YAML config loading (spec §7's `tablediff run
+"""Unit tests for YAML config loading (spec §7's `rowproof run
 CONFIG.yaml`) — pure Python, no database, no CLI.
 """
 
 
 import pytest
 
-from tablediff.config import load_config
-from tablediff.core.errors import TableDiffError
+from rowproof.config import load_config
+from rowproof.core.errors import RowProofError
 
 
 def write(tmp_path, name, content):
@@ -77,7 +77,7 @@ def test_missing_env_var_raises_clear_error(tmp_path):
         tables: []
         """,
     )
-    with pytest.raises(TableDiffError, match="DEFINITELY_NOT_SET_XYZ"):
+    with pytest.raises(RowProofError, match="DEFINITELY_NOT_SET_XYZ"):
         load_config(path)
 
 
@@ -91,7 +91,7 @@ def test_table_missing_source_or_target_raises(tmp_path):
           - source: prod_pg/public.orders
         """,
     )
-    with pytest.raises(TableDiffError, match="source.*target|target.*source"):
+    with pytest.raises(RowProofError, match="source.*target|target.*source"):
         load_config(path)
 
 
@@ -116,7 +116,7 @@ def test_key_columns_accept_comma_separated_string_or_list(tmp_path):
 
 
 def test_missing_file_raises_table_diff_error(tmp_path):
-    with pytest.raises(TableDiffError):
+    with pytest.raises(RowProofError):
         load_config(str(tmp_path / "does-not-exist.yaml"))
 
 

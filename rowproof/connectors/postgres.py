@@ -9,8 +9,8 @@ from typing import Callable
 
 import psycopg
 
-from tablediff.connectors import _pgwire
-from tablediff.core.models import Column, NormalisationRule, NormaliseOptions, TableRef
+from rowproof.connectors import _pgwire
+from rowproof.core.models import Column, NormalisationRule, NormaliseOptions, TableRef
 
 _INT_TYPES = {
     "smallint", "integer", "bigint", "int2", "int4", "int8",

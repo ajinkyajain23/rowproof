@@ -6,8 +6,8 @@ test_m1_fixtures.py then proves the *rendered SQL* that consumes this
 module's output is correct against real Postgres.
 """
 
-from tablediff.core.column_matching import match_columns
-from tablediff.core.models import Column, NormalisationRule
+from rowproof.core.column_matching import match_columns
+from rowproof.core.models import Column, NormalisationRule
 
 
 def col(name, native_type, nullable=True, ordinal=1, scale=None, precision=None):
@@ -154,7 +154,7 @@ def test_no_ts_2_upgrade_when_precision_matches():
 
 
 def test_str_2_promotion_when_trim_or_case_insensitive_active():
-    from tablediff.core.models import NormaliseOptions
+    from rowproof.core.models import NormaliseOptions
 
     src = {"name": col("name", "text")}
     tgt = {"name": col("name", "text")}

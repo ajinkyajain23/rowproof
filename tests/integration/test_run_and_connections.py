@@ -1,16 +1,16 @@
-"""`tablediff run CONFIG.yaml` and `tablediff connections test NAME`
+"""`rowproof run CONFIG.yaml` and `rowproof connections test NAME`
 (spec §7) against real Postgres.
 """
 
 from __future__ import annotations
 
-from tablediff.cli.main import main as cli_main
+from rowproof.cli.main import main as cli_main
 
 from .conftest import exec_sql
 
 
 def write_config(tmp_path, content: str) -> str:
-    p = tmp_path / "tablediff.yaml"
+    p = tmp_path / "rowproof.yaml"
     p.write_text(content)
     return str(p)
 

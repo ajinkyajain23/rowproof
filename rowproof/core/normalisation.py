@@ -8,7 +8,7 @@ core/ entirely.
 
 from __future__ import annotations
 
-from tablediff.core.models import NormalisationRule
+from rowproof.core.models import NormalisationRule
 
 _INT_TYPES = {
     "smallint",

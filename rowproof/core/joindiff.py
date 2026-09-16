@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import time
 
-from tablediff.connectors.base import Connector
-from tablediff.core.hashdiff import (
+from rowproof.connectors.base import Connector
+from rowproof.core.hashdiff import (
     DEFAULT_MAX_DIFF_ROWS,
     _apply_column_match,
     _build_plan,
@@ -23,7 +23,7 @@ from tablediff.core.hashdiff import (
     _validate_key_unique_side,
     _Plan,
 )
-from tablediff.core.models import (
+from rowproof.core.models import (
     Algorithm,
     DiffResult,
     NormaliseOptions,

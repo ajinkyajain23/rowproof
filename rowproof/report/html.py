@@ -18,9 +18,9 @@ from datetime import datetime, timezone
 
 from jinja2 import Template
 
-import tablediff
-from tablediff.cli.spec import redact_dsn
-from tablediff.core.models import DiffResult
+import rowproof
+from rowproof.cli.spec import redact_dsn
+from rowproof.core.models import DiffResult
 
 _TEMPLATE = Template(
     """\
@@ -28,7 +28,7 @@ _TEMPLATE = Template(
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>tablediff report -- {{ result.source.qualified_name }}</title>
+<title>rowproof report -- {{ result.source.qualified_name }}</title>
 <style>
   body { font-family: Georgia, 'Times New Roman', serif; margin: 2rem auto; max-width: 900px;
          color: #1a1a1a; background: #fff; line-height: 1.45; }
@@ -115,7 +115,7 @@ _TEMPLATE = Template(
   <table>
     <tr><th>who</th><td>{{ generated_by }}</td></tr>
     <tr><th>when</th><td>{{ generated_at }}</td></tr>
-    <tr><th>tablediff version</th><td>{{ tablediff_version }}</td></tr>
+    <tr><th>rowproof version</th><td>{{ rowproof_version }}</td></tr>
     <tr><th>python version</th><td>{{ python_version }}</td></tr>
     <tr><th>source DSN</th><td>{{ source_dsn_redacted }}</td></tr>
     <tr><th>target DSN</th><td>{{ target_dsn_redacted }}</td></tr>
@@ -159,7 +159,7 @@ def render_html(
         status=status,
         generated_at=when.isoformat(timespec="seconds"),
         generated_by=who,
-        tablediff_version=tablediff.__version__,
+        rowproof_version=rowproof.__version__,
         python_version=platform.python_version(),
         source_dsn_redacted=redact_dsn(source_dsn),
         target_dsn_redacted=redact_dsn(target_dsn),

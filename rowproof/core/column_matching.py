@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from tablediff.core.models import Column, NormalisationRule, NormaliseOptions, Warning as TdWarning
-from tablediff.core.normalisation import pick_rule
+from rowproof.core.models import Column, NormalisationRule, NormaliseOptions, Warning as TdWarning
+from rowproof.core.normalisation import pick_rule
 
 # Coarse type families for spec §6.2's "families incompatible" check.
 # Deliberately coarser than NormalisationRule: STR-1/STR-2 are the same

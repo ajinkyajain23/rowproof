@@ -1,6 +1,6 @@
-# YAML config loading/validation for `tablediff run config.yaml` (spec §7,
+# YAML config loading/validation for `rowproof run config.yaml` (spec §7,
 # §9 M1).
-"""Config file format (spec §7's `tablediff run CONFIG.yaml`):
+"""Config file format (spec §7's `rowproof run CONFIG.yaml`):
 
     connections:
       prod_pg: postgres://user:${PROD_PG_PASSWORD}@host:5432/db
@@ -38,8 +38,8 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from tablediff.core.errors import TableDiffError
-from tablediff.core.hashdiff import DEFAULT_MAX_DIFF_ROWS, DEFAULT_ROW_THRESHOLD
+from rowproof.core.errors import RowProofError
+from rowproof.core.hashdiff import DEFAULT_MAX_DIFF_ROWS, DEFAULT_ROW_THRESHOLD
 
 _ENV_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -48,7 +48,7 @@ def _substitute_env(text: str) -> str:
     def replace(m: re.Match) -> str:
         name = m.group(1)
         if name not in os.environ:
-            raise TableDiffError(
+            raise RowProofError(
                 f"config references ${{{name}}} but that environment variable is not set"
             )
         return os.environ[name]
@@ -63,7 +63,7 @@ def _as_list(value) -> list[str] | None:
         return [v.strip() for v in value.split(",") if v.strip()]
     if isinstance(value, list):
         return [str(v) for v in value]
-    raise TableDiffError(f"expected a list or comma-separated string, got {value!r}")
+    raise RowProofError(f"expected a list or comma-separated string, got {value!r}")
 
 
 def _as_column_map(value) -> dict | None:
@@ -80,7 +80,7 @@ def _as_column_map(value) -> dict | None:
             src, _, tgt = pair.partition(":")
             result[src.strip()] = tgt.strip()
         return result or None
-    raise TableDiffError(f"column_map: expected a mapping or 'a:b,c:d' string, got {value!r}")
+    raise RowProofError(f"column_map: expected a mapping or 'a:b,c:d' string, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -115,7 +115,7 @@ def _resolve_connection_value(name: str, value) -> str:
         return value
     if isinstance(value, dict) and "dsn" in value:
         return str(value["dsn"])
-    raise TableDiffError(f"connections.{name}: expected a DSN string or a mapping with a 'dsn' key")
+    raise RowProofError(f"connections.{name}: expected a DSN string or a mapping with a 'dsn' key")
 
 
 def load_config(path: str) -> Config:
@@ -123,15 +123,15 @@ def load_config(path: str) -> Config:
         with open(path, encoding="utf-8") as f:
             raw_text = f.read()
     except OSError as e:
-        raise TableDiffError(f"could not read config file '{path}': {e}") from e
+        raise RowProofError(f"could not read config file '{path}': {e}") from e
 
     raw_text = _substitute_env(raw_text)
     try:
         data = yaml.safe_load(raw_text) or {}
     except yaml.YAMLError as e:
-        raise TableDiffError(f"'{path}' is not valid YAML: {e}") from e
+        raise RowProofError(f"'{path}' is not valid YAML: {e}") from e
     if not isinstance(data, dict):
-        raise TableDiffError(f"'{path}' must be a YAML mapping with 'connections'/'tables' keys")
+        raise RowProofError(f"'{path}' must be a YAML mapping with 'connections'/'tables' keys")
 
     connections = {
         name: _resolve_connection_value(name, value)
@@ -141,7 +141,7 @@ def load_config(path: str) -> Config:
     tables = []
     for i, t in enumerate(data.get("tables") or []):
         if not isinstance(t, dict) or "source" not in t or "target" not in t:
-            raise TableDiffError(f"tables[{i}]: both 'source' and 'target' are required")
+            raise RowProofError(f"tables[{i}]: both 'source' and 'target' are required")
         tables.append(
             TableJob(
                 source=t["source"],

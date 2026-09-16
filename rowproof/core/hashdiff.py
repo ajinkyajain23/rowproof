@@ -4,7 +4,7 @@ Zero database-driver imports (spec §0 rule 4): every SQL string is built
 here from the pieces a Connector hands back (normalise_expr, row_hash_expr,
 aggregate_hash_expr, quote_identifier, quote_literal) and executed only
 through connector.query(). Swap in any object satisfying
-tablediff.connectors.base.Connector — real or fake — and this module
+rowproof.connectors.base.Connector — real or fake — and this module
 doesn't change.
 """
 
@@ -17,10 +17,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
-from tablediff.connectors.base import Connector
-from tablediff.core.column_matching import match_columns
-from tablediff.core.errors import NonUniqueKeyError, NoPrimaryKeyError
-from tablediff.core.models import (
+from rowproof.connectors.base import Connector
+from rowproof.core.column_matching import match_columns
+from rowproof.core.errors import NonUniqueKeyError, NoPrimaryKeyError
+from rowproof.core.models import (
     Algorithm,
     Column,
     DiffResult,
@@ -31,8 +31,8 @@ from tablediff.core.models import (
     TableRef,
     Warning as TdWarning,
 )
-from tablediff.core.normalisation import pick_rule
-from tablediff.core.segmentation import (
+from rowproof.core.normalisation import pick_rule
+from rowproof.core.segmentation import (
     assert_contiguous_coverage,
     clamp_to_range,
     compute_num_segments,
@@ -886,7 +886,7 @@ def explain(
     assume_tz: str = "UTC",
     column_map: dict | None = None,
 ) -> list[str]:
-    """Return the SQL tablediff would run, without executing any of it.
+    """Return the SQL rowproof would run, without executing any of it.
 
     Segment boundaries can't be known without running the bounds query
     (which explain must not do), so the per-segment statement is shown as

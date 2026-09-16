@@ -10,7 +10,7 @@ Pure math — no connectors involved. Two segmentation strategies:
 
 import uuid
 
-from tablediff.core.segmentation import (
+from rowproof.core.segmentation import (
     compute_num_segments,
     segment_by_samples,
     segment_numeric_range,

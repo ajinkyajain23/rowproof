@@ -6,7 +6,7 @@ cross-engine equality spec §5 calls non-negotiable, the uuid-vs-VARCHAR
 compatibility spec §6.2 describes, and a clean-error check for bad
 credentials (spec §10).
 
-Point `TABLEDIFF_TEST_SF_DSN` at a reachable account
+Point `ROWPROOF_TEST_SF_DSN` at a reachable account
 (`snowflake://user:pw@account/database`) and this file runs for real; a
 per-test SCHEMA is created inside that database and dropped after (schema
 create/drop is a metadata-only operation, no warehouse credits spent —
@@ -32,11 +32,11 @@ from __future__ import annotations
 
 import pytest
 
-from tablediff.connectors._sfwire import ConnectionFailedError
-from tablediff.connectors.postgres import PostgresConnector
-from tablediff.connectors.snowflake import SnowflakeConnector
-from tablediff.core.hashdiff import diff as hashdiff
-from tablediff.core.models import TableRef
+from rowproof.connectors._sfwire import ConnectionFailedError
+from rowproof.connectors.postgres import PostgresConnector
+from rowproof.connectors.snowflake import SnowflakeConnector
+from rowproof.core.hashdiff import diff as hashdiff
+from rowproof.core.models import TableRef
 
 from .conftest import SF_DSN_URL, _sf_dsn
 
@@ -320,7 +320,7 @@ class TestPrimaryKeyDetection:
 class TestCleanErrorForBadCredentials:
     def test_bad_password_raises_connection_failed_not_a_crash(self):
         # spec §10: "Clean error for: bad credentials."
-        from tablediff.connectors._sfwire import ConnectionFailedError
+        from rowproof.connectors._sfwire import ConnectionFailedError
 
         real = _sf_dsn()
         bad_dsn = f"snowflake://{real.user}:definitely-the-wrong-password@{real.account}/{real.database}"

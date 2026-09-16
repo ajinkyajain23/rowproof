@@ -45,10 +45,10 @@ password (`clickhouse://default:@127.0.0.1:8123/default`). This
 compose file sets one, so export the override before running pytest:
 
 ```
-export TABLEDIFF_TEST_CH_DSN="clickhouse://default:clickhouse@127.0.0.1:8123/default"
+export ROWPROOF_TEST_CH_DSN="clickhouse://default:clickhouse@127.0.0.1:8123/default"
 ```
 
-(Postgres needs no override — `TABLEDIFF_TEST_PG_ADMIN_DSN` already
+(Postgres needs no override — `ROWPROOF_TEST_PG_ADMIN_DSN` already
 defaults to `postgres://postgres:postgres@127.0.0.1:5432/postgres`, which
 this compose file satisfies.)
 
@@ -101,9 +101,9 @@ this):
 
 ## 5. Replace the two stand-ins
 
-- `tablediff/connectors/postgres.py`: replace `_pgwire.py`'s
+- `rowproof/connectors/postgres.py`: replace `_pgwire.py`'s
   psql-subprocess calls with real `psycopg` (v3) calls.
-- `tablediff/connectors/clickhouse.py`: replace `_chwire.py`'s stdlib-HTTP
+- `rowproof/connectors/clickhouse.py`: replace `_chwire.py`'s stdlib-HTTP
   calls with real `clickhouse-connect` calls.
 
 Neither connector's public method signatures should need to change

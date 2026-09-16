@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 
-from tablediff.core.models import Segment
+from rowproof.core.models import Segment
 
 DEFAULT_TARGET_ROWS_PER_SEGMENT = 100_000
 DEFAULT_MIN_SEGMENTS = 8
