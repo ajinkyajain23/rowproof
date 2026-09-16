@@ -519,15 +519,19 @@ class TestNoPrimaryKeyExitsTwo:
         assert code == 2
         assert "primary key" in captured.err.lower() or "--key" in captured.err
 
-    def test_still_clean_exit_2_no_traceback_when_verbose_is_on(self, pg_database, capsys):
+    def test_still_clean_exit_2_when_verbose_is_on(self, pg_database, capsys):
         # Regression test for a real bug the network-kill test below found:
         # cmd_diff used to re-raise the caught exception when --verbose was
         # set (meaning to show a traceback for debugging), which instead
         # crashed the process outright — Python's own unhandled-exception
         # handler prints the traceback AND exits with status 1, not the
-        # documented 2. Any error path must stay exit-2/no-traceback
-        # whether or not --verbose is set; this is the fast, deterministic
-        # check, the killed-Postgres test below is the slow, real-world one.
+        # documented 2. Any error path must stay exit-2 whether or not
+        # --verbose is set; this is the fast, deterministic check, the
+        # killed-Postgres test below is the slow, real-world one. M4 later
+        # added a sanctioned "traceback only under --verbose" policy (see
+        # that test's own docstring), so a traceback appearing here now
+        # that --verbose is on is expected, not a regression — what this
+        # test still protects is the exit code and the one-line message.
         exec_sql(pg_database, "CREATE TABLE a (name text)")
         exec_sql(pg_database, "CREATE TABLE b (name text)")
 
@@ -536,7 +540,7 @@ class TestNoPrimaryKeyExitsTwo:
         captured = capsys.readouterr()
 
         assert code == 2
-        assert "Traceback" not in captured.err
+        assert "primary key" in captured.err.lower() or "--key" in captured.err
 
 
 class TestNonUniqueKeyExitsTwo:
@@ -623,11 +627,28 @@ def _wait_for_postgres_ready(attempts: int = 20, delay: float = 0.25) -> None:
 
 
 class TestNetworkDropMidRun:
-    def test_postgres_actually_killed_mid_run_is_a_clean_error_no_traceback(self, pg_database):
+    def test_postgres_actually_killed_mid_run_is_a_clean_error(self, pg_database):
         """This does NOT simulate a failure — it really stops the Postgres
         service while `rowproof diff` is running against it (a real
         subprocess, not an in-process call), so the CLI has to survive an
-        actual dropped connection, not a mocked exception."""
+        actual dropped connection, not a mocked exception.
+
+        This test used to assert stderr never contains "Traceback", full
+        stop, even under --verbose — right for the bug it was written to
+        catch (a bare `raise` after catching the exception, which doesn't
+        add a traceback to a clean report, it crashes the process outright:
+        Python's own unhandled-exception handler then prints the traceback
+        AND exits with status 1, not the documented 2). M4 later added a
+        real, sanctioned policy for exactly this case: "traceback only
+        under --verbose", via `traceback.print_exc()` followed by
+        returning EXIT_COULD_NOT_COMPARE (never a bare `raise`) — so a
+        traceback appearing in stderr here, now that --verbose is on, is
+        the intended behavior, not a regression. What still must never
+        happen, and what this test still exists to prove: the process
+        exits 2 (never crashes to 1), and the one-line "error: ..."
+        message is still present regardless of whether --verbose also
+        printed a traceback after it.
+        """
         import subprocess
         import sys
 
@@ -696,7 +717,6 @@ class TestNetworkDropMidRun:
             f"expected exit 2 on a real dropped connection, got {proc.returncode}\n"
             f"stdout: {remaining_stdout}\nstderr: {full_stderr}"
         )
-        assert "Traceback" not in full_stderr, f"leaked a traceback:\n{full_stderr}"
         assert "error:" in full_stderr.lower()
 
 

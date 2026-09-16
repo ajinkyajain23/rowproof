@@ -1,4 +1,4 @@
-"""tablediff CLI — argparse stand-in for `typer` (see docs/DEV_ENVIRONMENT.md).
+"""rowproof CLI — argparse stand-in for `typer` (see docs/DEV_ENVIRONMENT.md).
 Flags, behavior and exit codes follow spec §7 exactly; only the argument
 *parsing library* differs from the spec's chosen stack.
 """
@@ -7,36 +7,76 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
+import traceback
 
-from tablediff.cli.render import render_json, render_terminal
-from tablediff.cli.spec import parse_source_spec, resolve_source_spec
-from tablediff.config import load_config
-from tablediff.connectors.clickhouse import ClickHouseConnector
-from tablediff.connectors.postgres import PostgresConnector
-from tablediff.core.errors import TableDiffError
-from tablediff.core.hashdiff import diff as run_hashdiff
-from tablediff.core.hashdiff import explain as run_explain
-from tablediff.core.joindiff import diff as run_joindiff
-from tablediff.report.html import render_html
+import rowproof
+from rowproof.cli.render import render_json, render_terminal
+from rowproof.cli.spec import parse_source_spec, resolve_source_spec
+from rowproof.config import load_config
+from rowproof.connectors.clickhouse import ClickHouseConnector
+from rowproof.connectors.postgres import PostgresConnector
+from rowproof.core.errors import RowProofError
+from rowproof.core.hashdiff import diff as run_hashdiff
+from rowproof.core.hashdiff import explain as run_explain
+from rowproof.core.joindiff import diff as run_joindiff
+from rowproof.report.html import render_html
 
 EXIT_MATCH = 0
 EXIT_DIFFERENT = 1
 EXIT_COULD_NOT_COMPARE = 2
 
+# M4 hardening: "Connection retry (3 attempts, backoff) on transient
+# failures; clean exit 2 after." Each connector's own wire module
+# (_pgwire/_chwire/_sfwire) raises its own ConnectionFailedError type for
+# both a genuinely transient failure (network blip, DNS hiccup, timeout)
+# and a permanent one (bad credentials, unknown database) alike -- there's
+# no cheap, reliable way from here to tell those apart without engine-
+# specific error-code inspection, so every connect() failure gets the same
+# short retry rather than none at all. Backoff is deliberately small
+# (0.5s, 1s) so a genuinely permanent failure like a bad password doesn't
+# feel sluggish -- worst case adds ~1.5s before the clean one-line error.
+_CONNECT_RETRY_ATTEMPTS = 3
+_CONNECT_RETRY_BACKOFF_SECONDS = 0.5
+
+
+def _connect_with_retry(connector, dsn: str) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, _CONNECT_RETRY_ATTEMPTS + 1):
+        try:
+            connector.connect(dsn)
+            return
+        except Exception as e:  # noqa: BLE001 - retried uniformly, see module note above
+            last_error = e
+            if attempt < _CONNECT_RETRY_ATTEMPTS:
+                time.sleep(_CONNECT_RETRY_BACKOFF_SECONDS * attempt)
+    raise last_error  # noqa: RSE102 - last_error is always set: the loop only exits this way after >=1 failed attempt
+
+
+def _report_error(e: Exception, verbose: bool, prefix: str = "error") -> None:
+    """spec §10 + M4: "Every error path produces a one-line human message;
+    traceback only under --verbose." The one-liner always goes to stderr;
+    the traceback (when requested) is appended after it, never instead of
+    it, so a --verbose run is strictly more informative, not different.
+    """
+    print(f"{prefix}: {e}", file=sys.stderr)
+    if verbose:
+        traceback.print_exc()
+
 def _snowflake_factory():
     # Imported lazily, not at module scope like Postgres/ClickHouse above
     # — spec §3/§9: Snowflake support is an optional extra
-    # (`tablediff[snowflake]`) precisely because its driver is a "heavy
+    # (`rowproof[snowflake]`) precisely because its driver is a "heavy
     # dependency" a Postgres/ClickHouse-only install shouldn't be forced
     # to carry. An eager top-level import would defeat that: it'd make
     # `snowflake-connector-python` a hard dependency of the whole CLI,
     # breaking every command for a user who installed the base package.
     try:
-        from tablediff.connectors.snowflake import SnowflakeConnector
+        from rowproof.connectors.snowflake import SnowflakeConnector
     except ImportError as e:
-        raise TableDiffError(
+        raise RowProofError(
             "Snowflake support requires the optional extra -- install with "
-            "`pip install tablediff[snowflake]` (or `pipx install tablediff[snowflake]`)"
+            "`pip install rowproof[snowflake]` (or `pipx install rowproof[snowflake]`)"
         ) from e
     return SnowflakeConnector()
 
@@ -55,7 +95,7 @@ def _make_connector(engine: str, verbose: bool):
     factory = _CONNECTOR_FACTORIES.get(engine)
     if factory is None:
         supported = ", ".join(sorted(set(_CONNECTOR_FACTORIES) - {"postgresql", "ch", "sf"}))
-        raise TableDiffError(f"unsupported engine '{engine}' (supported: {supported})")
+        raise RowProofError(f"unsupported engine '{engine}' (supported: {supported})")
     connector = factory()
     if verbose and hasattr(connector, "on_query"):
         connector.on_query = lambda sql: print(f"[sql] {sql}", file=sys.stderr)
@@ -112,8 +152,8 @@ def _connect_pair(args, sql_log: list[str] | None = None):
                 connector.on_query = (
                     lambda sql, _prev=previous: (_prev(sql) if _prev else None, sql_log.append(sql))
                 )
-    source.connect(src_spec.connect_dsn)
-    target.connect(tgt_spec.connect_dsn)
+    _connect_with_retry(source, src_spec.connect_dsn)
+    _connect_with_retry(target, tgt_spec.connect_dsn)
 
     # spec §7: `--threads N` — extra, already-connected connectors per
     # side for core.hashdiff's parallel segment path (see its own
@@ -129,9 +169,9 @@ def _connect_pair(args, sql_log: list[str] | None = None):
         source_pool = [_make_connector(src_spec.engine, args.verbose) for _ in range(threads)]
         target_pool = [_make_connector(tgt_spec.engine, args.verbose) for _ in range(threads)]
         for connector in source_pool:
-            connector.connect(src_spec.connect_dsn)
+            _connect_with_retry(connector, src_spec.connect_dsn)
         for connector in target_pool:
-            connector.connect(tgt_spec.connect_dsn)
+            _connect_with_retry(connector, tgt_spec.connect_dsn)
 
     return source, target, src_spec.table_ref, tgt_spec.table_ref, source_pool, target_pool
 
@@ -187,7 +227,7 @@ def cmd_diff(args) -> int:
                 # joindiff (or both sides really are the same connection)
                 # while also asking to sample -- a clear error beats
                 # silently ignoring the flag.
-                raise TableDiffError(
+                raise RowProofError(
                     "--sample/--sample-rows requires hashdiff (spec §4.3) -- "
                     "pass --algorithm hashdiff, or diff two different connections "
                     "so hashdiff is auto-selected"
@@ -246,7 +286,7 @@ def cmd_diff(args) -> int:
                     sql_statements=sql_log,
                 )
                 if not args.html_path:
-                    raise TableDiffError("--output html requires --html-path PATH")
+                    raise RowProofError("--output html requires --html-path PATH")
                 with open(args.html_path, "w", encoding="utf-8") as f:
                     f.write(html_text)
 
@@ -256,23 +296,23 @@ def cmd_diff(args) -> int:
             return EXIT_MATCH if result.source_count == result.target_count else EXIT_DIFFERENT
         return result.exit_code()
 
-    except TableDiffError as e:
-        print(f"error: {e}", file=sys.stderr)
+    except RowProofError as e:
+        _report_error(e, args.verbose)
         return EXIT_COULD_NOT_COMPARE
-    except Exception as e:  # noqa: BLE001 - CLI boundary: never leak a traceback
+    except Exception as e:  # noqa: BLE001 - CLI boundary: never leak an unhandled traceback
         # NOTE: this used to re-raise when --verbose was set, meaning to
         # show a traceback for debugging. That was wrong: re-raising here
         # doesn't add a traceback to a clean report, it crashes the process
         # — Python's own unhandled-exception handler then prints the
         # traceback AND exits with status 1, not 2. A real network-kill
         # test (tests/integration/test_m0_acceptance.py) caught this doing
-        # exactly that. Spec §13 M0's "kill network mid-run" bullet
-        # requires exit 2 with no traceback UNCONDITIONALLY (it carves out
-        # no --verbose exception) — M4's "traceback only under --verbose"
-        # is a later, more permissive general policy; when it's built, it
-        # needs to be `traceback.print_exc()` followed by returning
-        # EXIT_COULD_NOT_COMPARE, never a bare `raise` here.
-        print(f"error: {e}", file=sys.stderr)
+        # exactly that. Spec §13 M0's "kill network mid-run" bullet requires
+        # exit 2 UNCONDITIONALLY, --verbose or not -- `_report_error` always
+        # returns normally (never raises), printing the one-line message
+        # unconditionally and the traceback ONLY when --verbose is set
+        # (M4: "traceback only under --verbose"), so exit 2 below always
+        # still happens either way.
+        _report_error(e, args.verbose)
         return EXIT_COULD_NOT_COMPARE
     finally:
         if source is not None:
@@ -299,11 +339,11 @@ def cmd_explain(args) -> int:
         for stmt in statements:
             print(stmt)
         return EXIT_MATCH
-    except TableDiffError as e:
-        print(f"error: {e}", file=sys.stderr)
+    except RowProofError as e:
+        _report_error(e, args.verbose)
         return EXIT_COULD_NOT_COMPARE
     except Exception as e:  # noqa: BLE001
-        print(f"error: {e}", file=sys.stderr)
+        _report_error(e, args.verbose)
         return EXIT_COULD_NOT_COMPARE
     finally:
         if source is not None:
@@ -327,8 +367,8 @@ def _run_one_job(job, connections: dict, verbose: bool) -> int:
         tgt_spec = resolve_source_spec(job.target, connections)
         source = _make_connector(src_spec.engine, verbose)
         target = _make_connector(tgt_spec.engine, verbose)
-        source.connect(src_spec.connect_dsn)
-        target.connect(tgt_spec.connect_dsn)
+        _connect_with_retry(source, src_spec.connect_dsn)
+        _connect_with_retry(target, tgt_spec.connect_dsn)
 
         algorithm = job.algorithm
         if algorithm == "auto":
@@ -362,11 +402,11 @@ def _run_one_job(job, connections: dict, verbose: bool) -> int:
         if job.fail_on == "count":
             return EXIT_MATCH if result.source_count == result.target_count else EXIT_DIFFERENT
         return result.exit_code()
-    except TableDiffError as e:
-        print(f"error ({job.source} -> {job.target}): {e}", file=sys.stderr)
+    except RowProofError as e:
+        _report_error(e, verbose, prefix=f"error ({job.source} -> {job.target})")
         return EXIT_COULD_NOT_COMPARE
     except Exception as e:  # noqa: BLE001 - never leak a traceback (see cmd_diff's note)
-        print(f"error ({job.source} -> {job.target}): {e}", file=sys.stderr)
+        _report_error(e, verbose, prefix=f"error ({job.source} -> {job.target})")
         return EXIT_COULD_NOT_COMPARE
     finally:
         if source is not None:
@@ -378,8 +418,8 @@ def _run_one_job(job, connections: dict, verbose: bool) -> int:
 def cmd_run(args) -> int:
     try:
         config = load_config(args.config)
-    except TableDiffError as e:
-        print(f"error: {e}", file=sys.stderr)
+    except RowProofError as e:
+        _report_error(e, args.verbose)
         return EXIT_COULD_NOT_COMPARE
 
     if not config.tables:
@@ -396,8 +436,8 @@ def cmd_run(args) -> int:
 def cmd_connections_test(args) -> int:
     try:
         config = load_config(args.config)
-    except TableDiffError as e:
-        print(f"error: {e}", file=sys.stderr)
+    except RowProofError as e:
+        _report_error(e, args.verbose)
         return EXIT_COULD_NOT_COMPARE
 
     if args.name not in config.connections:
@@ -411,14 +451,14 @@ def cmd_connections_test(args) -> int:
     engine = dsn.split("://", 1)[0] if "://" in dsn else ""
     connector = None
     try:
-        connector = _make_connector(engine, False)
-        connector.connect(dsn)
+        connector = _make_connector(engine, args.verbose)
+        _connect_with_retry(connector, dsn)
         connector.query("SELECT 1")
-    except TableDiffError as e:
-        print(f"error: connection '{args.name}' failed: {e}", file=sys.stderr)
+    except RowProofError as e:
+        _report_error(e, args.verbose, prefix=f"error: connection '{args.name}' failed")
         return EXIT_COULD_NOT_COMPARE
     except Exception as e:  # noqa: BLE001 - never leak a traceback (see cmd_diff's note)
-        print(f"error: connection '{args.name}' failed: {e}", file=sys.stderr)
+        _report_error(e, args.verbose, prefix=f"error: connection '{args.name}' failed")
         return EXIT_COULD_NOT_COMPARE
     finally:
         if connector is not None:
@@ -446,7 +486,10 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="tablediff")
+    parser = argparse.ArgumentParser(prog="rowproof")
+    parser.add_argument(
+        "--version", action="version", version=f"rowproof {rowproof.__version__}",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     diff_p = sub.add_parser("diff", help="verify two tables match")
@@ -473,12 +516,12 @@ def build_parser() -> argparse.ArgumentParser:
     diff_p.add_argument("--fail-on", choices=["none", "any", "count"], default="any")
     diff_p.set_defaults(func=cmd_diff)
 
-    explain_p = sub.add_parser("explain", help="print the SQL tablediff would run; execute nothing")
+    explain_p = sub.add_parser("explain", help="print the SQL rowproof would run; execute nothing")
     _add_common_args(explain_p)
     explain_p.set_defaults(func=cmd_explain)
 
     run_p = sub.add_parser("run", help="run every table pair in a config file; one report")
-    run_p.add_argument("config", help="path to a tablediff YAML config file")
+    run_p.add_argument("config", help="path to a rowproof YAML config file")
     run_p.add_argument("--verbose", action="store_true", help="log every generated SQL statement")
     run_p.set_defaults(func=cmd_run)
 
@@ -487,8 +530,9 @@ def build_parser() -> argparse.ArgumentParser:
     connections_test_p = connections_sub.add_parser("test", help="check credentials for a named connection")
     connections_test_p.add_argument("name", help="connection name, as declared in the config file")
     connections_test_p.add_argument(
-        "--config", default="tablediff.yaml", help="path to a tablediff YAML config file (default: tablediff.yaml)"
+        "--config", default="rowproof.yaml", help="path to a rowproof YAML config file (default: rowproof.yaml)"
     )
+    connections_test_p.add_argument("--verbose", action="store_true", help="log every generated SQL statement")
     connections_test_p.set_defaults(func=cmd_connections_test)
 
     return parser
