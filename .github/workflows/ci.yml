@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        env:
+          CLICKHOUSE_USER: default
+          CLICKHOUSE_PASSWORD: clickhouse
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+        ports:
+          - 8123:8123
+          - 9000:9000
+        options: >-
+          --health-cmd "wget -qO- http://localhost:8123/ping || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install rowproof and dev dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run full test suite (unit + Postgres/ClickHouse integration)
+        # Snowflake tests need real trial-account credentials, which CI
+        # doesn't have -- they SKIP cleanly via their own
+        # `_require_snowflake` fixture (tests/integration/conftest.py)
+        # rather than failing; that skip is the only one this job allows
+        # (spec's M4 hardening: "Snowflake tests skip in CI without
+        # credentials, the only allowed skip"), checked below by failing
+        # the job if pytest reports any OTHER skip.
+        run: |
+          pip install pytest-json-report
+          pytest -v --json-report --json-report-file=/tmp/report.json
+
+      - name: Verify no unexpected skips
+        run: |
+          python -c "
+          import json
+          report = json.load(open('/tmp/report.json'))
+          skipped = [t for t in report['tests'] if t['outcome'] == 'skipped']
+          unexpected = [
+              t for t in skipped
+              if 'snowflake' not in t['nodeid'].lower()
+          ]
+          if unexpected:
+              print('Unexpected skips (only Snowflake tests may skip in CI):')
+              for t in unexpected:
+                  print(' -', t['nodeid'])
+              raise SystemExit(1)
+          print(f\"OK: {len(skipped)} skip(s), all Snowflake-only.\")
+          "
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel and sdist
+        run: |
+          pip install build
+          python -m build
+
+      - name: Install the built wheel into a clean venv and smoke-test the CLI
+        run: |
+          python -m venv /tmp/clean-install
+          /tmp/clean-install/bin/pip install dist/*.whl
+          /tmp/clean-install/bin/rowproof --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

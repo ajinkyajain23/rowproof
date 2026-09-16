@@ -1,0 +1,48 @@
+name: Release
+
+# Publishes to PyPI via "trusted publishing" (OIDC) -- no API token stored
+# in this repo. This requires a one-time manual step on pypi.org BEFORE
+# the first release: a human creates the `rowproof` project (or configures
+# a "pending publisher") and adds this repo/workflow as a trusted
+# publisher. See https://docs.pypi.org/trusted-publishers/ -- that step
+# needs a PyPI account login and can't be done from CI or by an agent.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel and sdist
+        run: |
+          pip install build
+          python -m build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # required for PyPI trusted publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
