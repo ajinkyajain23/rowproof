@@ -9,8 +9,8 @@ bullet it proves.
 
 from __future__ import annotations
 
+import subprocess
 import time
-from pathlib import Path
 
 import pytest
 
@@ -614,6 +614,23 @@ class TestExplainExecutesNoDataQueries:
             assert "information_schema" in sql, f"unexpected query during explain: {sql}"
 
 
+def _find_container_by_published_port(port: int) -> str | None:
+    """The running Docker container ID that publishes `port` on the host
+    -- works whether that container came from this project's own
+    docker-compose.yml (local dev) or a plain GitHub Actions "service
+    container" (CI, no compose project involved at all), since `docker
+    stop`/`docker start` by container ID doesn't care which started it.
+    `docker ps --filter publish=<port>` matches on the host-side publish
+    mapping regardless of the container's internal port.
+    """
+    result = subprocess.run(
+        ["docker", "ps", "--filter", f"publish={port}", "--format", "{{.ID}}"],
+        capture_output=True, text=True,
+    )
+    container_id = result.stdout.strip().splitlines()[0] if result.stdout.strip() else None
+    return container_id
+
+
 def _wait_for_postgres_ready(attempts: int = 20, delay: float = 0.25) -> None:
     last_error = None
     for _ in range(attempts):
@@ -649,7 +666,6 @@ class TestNetworkDropMidRun:
         message is still present regardless of whether --verbose also
         printed a traceback after it.
         """
-        import subprocess
         import sys
 
         # Big enough that the diff is still mid-flight (past connect and
@@ -691,23 +707,24 @@ class TestNetworkDropMidRun:
                 f"(saw {sql_lines_seen} [sql] lines; stderr so far: {''.join(consumed_stderr)!r})"
             )
 
-        # This project's dev environment runs Postgres via
-        # docker-compose.yml (docs/LAPTOP_SETUP.md), not a native
-        # `service postgresql` — stop/start the container instead. Both
-        # achieve the same thing this test needs: the connection really
-        # drops out from under a live query, not a mocked exception.
-        project_root = Path(__file__).resolve().parents[2]
-        stop = subprocess.run(
-            ["docker", "compose", "stop", "postgres"], capture_output=True, text=True, cwd=project_root
-        )
+        # This project's dev environment runs Postgres via docker-compose
+        # (docs/LAPTOP_SETUP.md); CI runs it as a plain GitHub Actions
+        # "service container" (spec'd directly in ci.yml, no compose
+        # project at all) -- `docker compose stop/start postgres` only
+        # works in the former (confirmed the hard way: CI failed with
+        # "service postgres has no container to start", since there's no
+        # compose project there for that command to address). Finding the
+        # container by its published port instead works identically
+        # either way -- both setups publish Postgres on the host's 5432.
+        container_id = _find_container_by_published_port(5432)
+        assert container_id, "no Docker container found publishing port 5432 -- can't test a real network drop"
+        stop = subprocess.run(["docker", "stop", container_id], capture_output=True, text=True)
         assert stop.returncode == 0, f"could not stop postgres for the test: {stop.stderr}"
 
         try:
             remaining_stdout, remaining_stderr = proc.communicate(timeout=30)
         finally:
-            start = subprocess.run(
-                ["docker", "compose", "start", "postgres"], capture_output=True, text=True, cwd=project_root
-            )
+            start = subprocess.run(["docker", "start", container_id], capture_output=True, text=True)
             assert start.returncode == 0, f"could not restart postgres after the test: {start.stderr}"
             _wait_for_postgres_ready()
 
