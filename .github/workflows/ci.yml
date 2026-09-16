@@ -47,7 +47,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install rowproof and dev dependencies
-        run: pip install -e ".[dev]"
+        # [snowflake] is required here too, not just [dev] -- the test
+        # files import rowproof.connectors.snowflake unconditionally
+        # (pytest.importorskip isn't used, since the intended "allowed
+        # skip" reason is missing Snowflake *credentials*, not a missing
+        # package). Without the package installed, pytest fails at
+        # collection time for those files instead of skipping cleanly.
+        run: pip install -e ".[dev,snowflake]"
 
       - name: Run full test suite (unit + Postgres/ClickHouse integration)
         # Snowflake tests need real trial-account credentials, which CI
