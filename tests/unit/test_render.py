@@ -121,3 +121,41 @@ def test_json_carries_tool_name():
     payload = json.loads(render_json(result))
     assert payload["tool"] == "rowproof"
     assert payload["schema_version"] == 1
+
+
+def _match_with_excluded(excluded):
+    return DiffResult(
+        source=TableRef(engine="postgres", database="db", table="a"),
+        target=TableRef(engine="clickhouse", database="db", table="a"),
+        key_columns=("id",),
+        algorithm=Algorithm.HASHDIFF,
+        source_count=10,
+        target_count=10,
+        excluded_columns=list(excluded),
+    )
+
+
+def test_terminal_match_that_skipped_columns_says_so_in_the_verdict():
+    # Found migrating a real database: `MATCH exit 0` was printed while a
+    # column was never compared (type mismatch -> excluded). For a tool that
+    # exists to give proof, the headline must not read as a clean pass.
+    text = render_terminal(_match_with_excluded(["activebool", "picture"]))
+    verdict = [line for line in text.splitlines() if line.strip().startswith("result")][0]
+    assert "MATCH" in verdict
+    assert "NOT compared" in verdict
+    assert "2 column" in verdict
+
+
+def test_terminal_clean_match_verdict_is_unchanged():
+    text = render_terminal(_match_with_excluded([]))
+    verdict = [line for line in text.splitlines() if line.strip().startswith("result")][0]
+    assert verdict.split() == ["result", "MATCH", "exit", "0"]
+
+
+def test_json_says_whether_every_column_was_compared():
+    full = json.loads(render_json(_match_with_excluded([])))
+    partial = json.loads(render_json(_match_with_excluded(["x"])))
+    assert full["fully_compared"] is True
+    assert partial["fully_compared"] is False
+    assert partial["excluded_columns"] == ["x"]
+    assert partial["is_match"] is True  # exit code semantics unchanged

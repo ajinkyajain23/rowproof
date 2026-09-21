@@ -195,7 +195,16 @@ class PostgresConnector:
         elif rule is NormalisationRule.TIME_1:
             inner = f"to_char({quoted}, 'HH24:MI:SS.US')"
         elif rule is NormalisationRule.BOOL_1:
-            inner = f"(CASE WHEN {quoted} THEN 'true' ELSE 'false' END)"
+            if native in ("boolean", "bool"):
+                inner = f"(CASE WHEN {quoted} THEN 'true' ELSE 'false' END)"
+            else:
+                # An integer paired with a boolean (see column_matching):
+                # exactly 1/0 -> true/false, anything else stays its own
+                # number so it can't be mistaken for `true`.
+                inner = (
+                    f"(CASE WHEN {quoted} = 1 THEN 'true' WHEN {quoted} = 0 THEN 'false' "
+                    f"ELSE ({quoted}::text) END)"
+                )
         elif rule is NormalisationRule.UUID_1:
             # Postgres already renders its native uuid type as lower-case,
             # hyphenated text — the canonical UUID-1 form is a plain cast.

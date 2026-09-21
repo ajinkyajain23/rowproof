@@ -295,6 +295,70 @@ class TestNullableAcrossEngines:
         assert result.is_match, result.row_diffs
 
 
+class TestMigrationShapedTypesAcrossEngines:
+    """Found by migrating the Pagila sample database Postgres -> ClickHouse
+    with ClickHouse's own `postgresql()` importer: a `boolean` becomes UInt8
+    and an enum becomes String, and both used to be silently EXCLUDED from
+    the comparison (so the run printed MATCH without checking them)."""
+
+    def _run(self, pg_database, ch_database, pg_ddl, pg_rows, ch_ddl, ch_rows):
+        from .conftest import exec_sql
+
+        exec_sql(pg_database, "CREATE TYPE mood AS ENUM ('happy', 'sad')")
+        exec_sql(pg_database, f"CREATE TABLE a (id bigint PRIMARY KEY, v {pg_ddl})")
+        exec_sql(pg_database, f"INSERT INTO a VALUES {pg_rows}")
+        ch_dsn = parse_ch_dsn(CH_ADMIN_DSN_URL)
+        run_query(ch_dsn, f"CREATE TABLE `{ch_database}`.b (id UInt64, v {ch_ddl}) ENGINE = Memory")
+        run_query(ch_dsn, f"INSERT INTO `{ch_database}`.b VALUES {ch_rows}")
+        source = PostgresConnector()
+        source.connect(pg_database)
+        target = ClickHouseConnector()
+        target.connect(_ch_dsn_for_database(ch_database))
+        return hashdiff(
+            source, target,
+            TableRef(engine="postgres", database=pg_database, table="a"),
+            TableRef(engine="clickhouse", database=ch_database, table="b"),
+            key_columns=["id"],
+        )
+
+    def test_postgres_boolean_vs_clickhouse_uint8_is_compared_and_matches(self, pg_database, ch_database):
+        result = self._run(
+            pg_database, ch_database,
+            "boolean", "(1, true), (2, false), (3, NULL)",
+            "Nullable(UInt8)", "(1, 1), (2, 0), (3, NULL)",
+        )
+        assert result.excluded_columns == []
+        assert result.is_match, result.row_diffs
+
+    def test_uint8_value_other_than_0_or_1_is_a_difference_not_true(self, pg_database, ch_database):
+        result = self._run(
+            pg_database, ch_database,
+            "boolean", "(1, true), (2, true)",
+            "UInt8", "(1, 1), (2, 2)",
+        )
+        assert not result.is_match
+        assert [rd.key[0] for rd in result.row_diffs] == [2]
+        assert result.row_diffs[0].changes["v"][2].value == "BOOL-1"
+
+    def test_postgres_enum_vs_clickhouse_string_is_compared_and_matches(self, pg_database, ch_database):
+        result = self._run(
+            pg_database, ch_database,
+            "mood", "(1, 'happy'), (2, 'sad')",
+            "String", "(1, 'happy'), (2, 'sad')",
+        )
+        assert result.excluded_columns == []
+        assert result.is_match, result.row_diffs
+
+    def test_a_changed_label_is_caught_across_enum_and_string(self, pg_database, ch_database):
+        result = self._run(
+            pg_database, ch_database,
+            "mood", "(1, 'happy')",
+            "String", "(1, 'sad')",
+        )
+        assert not result.is_match
+        assert result.row_diffs[0].changes["v"][:2] == ("happy", "sad")
+
+
 class TestClickHouseKeySegmentation:
     """spec §9 M2: "segment translation for UInt keys" — core/hashdiff.py's
     segment-and-bisect path (_key_expr_for_ordering / _bounds_key_expr) used

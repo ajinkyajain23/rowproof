@@ -180,6 +180,13 @@ class DiffResult:
     sample_pct: float | None = None
 
     @property
+    def fully_compared(self) -> bool:
+        """False when any column was left out of the comparison (a type
+        mismatch, or a column that exists on only one side). A MATCH in
+        that case only covers the columns that WERE compared."""
+        return not self.excluded_columns
+
+    @property
     def is_match(self) -> bool:
         return (
             self.source_count == self.target_count

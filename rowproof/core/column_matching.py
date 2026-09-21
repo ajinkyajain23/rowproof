@@ -65,6 +65,21 @@ def _families_compatible(src_rule: NormalisationRule, tgt_rule: NormalisationRul
     # what lets a text-stored uuid compare correctly against a native one.
     if {_family(src_rule), _family(tgt_rule)} == {"uuid", "string"}:
         return True
+    # spec §6.1 (BOOL-1): "Integers 0/1 in one engine vs boolean in the
+    # other: map, cite rule". ClickHouse's own Postgres importer turns
+    # `boolean` into UInt8, so this is the normal shape of a real
+    # migration -- excluding it leaves boolean columns silently unverified
+    # (found migrating the Pagila sample database). Deliberately narrow:
+    # only an INTEGER paired with a BOOLEAN. A decimal or float next to a
+    # boolean is still a genuine mismatch, and an integer paired with
+    # anything other than a boolean gets no special treatment.
+    if {src_rule, tgt_rule} == {NormalisationRule.BOOL_1, NormalisationRule.INT_1}:
+        return True
+    # spec §6.1 (ENUM-1): "the label as text". Enums migrate to plain
+    # strings in most engines (ClickHouse's importer does exactly that);
+    # both sides render as the label text, so they compare directly.
+    if {_family(src_rule), _family(tgt_rule)} == {"enum", "string"}:
+        return True
     return _family(src_rule) == _family(tgt_rule)
 
 
@@ -150,6 +165,13 @@ def match_columns(
         # falling through to its own native STR-1/STR-2.
         if (_family(src_rule) == "uuid") != (_family(tgt_rule) == "uuid"):
             rule_overrides[name] = NormalisationRule.UUID_1
+
+        # BOOL-1: an integer standing in for a boolean renders as
+        # true/false when it is exactly 1/0 (see each connector's BOOL-1
+        # rendering) and as its own number otherwise, so a stray 2 can
+        # never be mistaken for `true`.
+        if {src_rule, tgt_rule} == {NormalisationRule.BOOL_1, NormalisationRule.INT_1}:
+            rule_overrides[name] = NormalisationRule.BOOL_1
 
         # DEC-1: canonical scale is the MIN of both sides' declared scale
         # (spec §6.1/§6.2) — never trust either side alone.

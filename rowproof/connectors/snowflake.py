@@ -216,7 +216,16 @@ class SnowflakeConnector:
         elif rule is NormalisationRule.TIME_1:
             inner = f"TO_CHAR({quoted}, 'HH24:MI:SS.FF6')"
         elif rule is NormalisationRule.BOOL_1:
-            inner = f"(CASE WHEN {quoted} THEN 'true' ELSE 'false' END)"
+            if native in ("boolean", "bool"):
+                inner = f"(CASE WHEN {quoted} THEN 'true' ELSE 'false' END)"
+            else:
+                # An integer (NUMBER with scale 0) paired with a boolean:
+                # exactly 1/0 -> true/false, anything else stays its own
+                # number so it can't be mistaken for `true`.
+                inner = (
+                    f"(CASE WHEN {quoted} = 1 THEN 'true' WHEN {quoted} = 0 THEN 'false' "
+                    f"ELSE TO_VARCHAR({quoted}) END)"
+                )
         elif rule is NormalisationRule.UUID_1:
             inner = self._uuid1_expr(quoted)
         elif rule is NormalisationRule.BIN_1:

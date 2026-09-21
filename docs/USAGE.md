@@ -115,6 +115,7 @@ error: Table 'public.nopk_a' has no primary key and no --key was given. Pass --k
 - Each changed value shows the **column**, the **source value → target value**, and the **rule** (`STR-1`, `DEC-1`, `TS-1`, ...) that decided how the two were compared. The rules are listed in the [README](../README.md#supported-types-canonical-comparison-rules).
 - `warning:` lines are things worth knowing that didn't stop the run: mismatched decimal scales, timestamps with no timezone, columns present on only one side, and so on. Warnings about how values were compared name the rule and the column.
 - Long lists are capped (`--max-diff-rows`, default 10,000). The counts stay exact even when the list is cut short.
+- **`MATCH` vs `MATCH (PARTIAL: N columns NOT compared)`.** A plain `MATCH` means every column was compared. If some columns were left out because their types can't be compared (a type changed in the migration, or a column exists on only one side), the verdict says so and names how many; the `columns` line and the warnings name which. The exit code is still `0`, but the tables are only proven equal for the columns that were compared. The HTML report shows an amber banner instead of a green one, and the JSON has `"fully_compared": false`.
 
 **Exit codes:**
 
@@ -345,6 +346,7 @@ Everything else that limits Snowflake support (login methods, JSON columns, cred
 | `error: Key column '...' not found in '...'` | `--key` names a column that isn't there | The message lists the real columns. For Snowflake, match the upper-case spelling |
 | `error: Table '...' has no primary key and no --key was given` | Nothing to identify rows by | Add `--key` |
 | `error: --key ... is not unique` | Two rows share that key value | Use a truly unique column, or a composite key |
+| `MATCH (PARTIAL: N columns NOT compared)` | Some columns have types that can't be compared with each other | Read the `warning: column '...' excluded` lines. Fix the type on one side if the change wasn't intended |
 | `warning: TS-3: naive timestamp column(s) compared as UTC` | A timestamp column has no timezone | rowproof compares it as UTC. Fine if that's true; otherwise use timezone-aware columns |
 | `warning: DEC-1 ... scale differs` | The two decimal columns have different decimal places | rowproof compares at the smaller scale; nothing to fix unless it's unexpected |
 | `error: --assume-tz ... is not supported yet` | See [limitations](#known-limitations) | Remove the flag |
@@ -360,5 +362,6 @@ Add `--verbose` to any command to also print every SQL statement, and a full tra
 - **Snowflake login is username and password only**: no SSO, MFA, key-pair, or warehouse/role options. See the [README](../README.md#snowflake-known-limitations).
 - **`rowproof run` is terminal-only**: no HTML/JSON output, sampling or threads option per table yet.
 - **Named connections** (`prod_pg/public.orders`) only work through a config file and `run`.
+- **Some type pairs are never compared**, and show up as `NOT compared`: a `bytea`/binary column against a text column, and an integer against a text column. Booleans against integers (0/1), and enums against text, *are* compared.
 - **JSON columns are compared as text** (rule `JSON-1` / `UNK-1`), so equivalent JSON formatted differently can show as different.
 - Supported databases: Postgres, ClickHouse, Snowflake. Databricks, BigQuery, Iceberg and MySQL are on the roadmap.

@@ -133,3 +133,20 @@ def test_html_is_valid_enough_to_have_matching_tags():
     assert "</html>" in html
     assert "<body" in html
     assert "</body>" in html
+
+
+def test_match_with_skipped_columns_is_flagged_partial_not_a_clean_match():
+    result = _match_result()
+    result.excluded_columns = ["activebool", "picture"]
+    html = render_html(result, source_dsn="postgres://u:p@h/db", target_dsn="clickhouse://u:p@h/db")
+    banner = html.split('<div class="banner', 1)[1].split("</div>", 1)[0]
+    assert "PARTIAL" in banner
+    assert "2 column" in banner
+    assert "incomplete" in banner  # the existing amber style, not the green "match"
+    assert "activebool" in html and "picture" in html  # and the card lists which ones
+
+
+def test_clean_match_banner_is_still_green_match():
+    html = render_html(_match_result(), source_dsn="postgres://u:p@h/db", target_dsn="clickhouse://u:p@h/db")
+    banner = html.split('<div class="banner', 1)[1].split("</div>", 1)[0]
+    assert 'match"' in banner and "PARTIAL" not in banner

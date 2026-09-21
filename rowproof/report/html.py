@@ -57,7 +57,7 @@ _TEMPLATE = Template(
 </head>
 <body>
 
-<div class="banner {{ status.lower() }}">{{ status }}</div>
+<div class="banner {{ banner_class }}">{{ status }}</div>
 
 <div class="card">
   <h2>{{ result.source.qualified_name }}</h2>
@@ -68,6 +68,9 @@ _TEMPLATE = Template(
     <tr><th>algorithm</th><td>{{ result.algorithm.value }}</td></tr>
     {% if result.sample_pct is not none %}
     <tr><th>sample</th><td>{{ result.sample_pct }}% of rows -- counts below are of the sample only</td></tr>
+    {% endif %}
+    {% if result.excluded_columns %}
+    <tr><th>columns NOT compared</th><td>{{ result.excluded_columns | join(', ') }}</td></tr>
     {% endif %}
     <tr><th>row count</th><td>source {{ result.source_count }} / target {{ result.target_count }}</td></tr>
     <tr><th>missing in target</th><td>{{ result.missing_in_target }}</td></tr>
@@ -152,11 +155,20 @@ def render_html(
     network, per spec §3's connectivity requirement for this format.
     """
     status = "MATCH" if result.is_match else "DIFFERENT"
+    banner_class = status.lower()
+    if result.is_match and not result.fully_compared:
+        # Same reasoning as the terminal verdict: a green MATCH banner
+        # must not hide columns that were never compared. The amber
+        # "incomplete" style already existed for exactly this kind of state.
+        n = len(result.excluded_columns)
+        status = f"MATCH — PARTIAL ({n} column{'s' if n != 1 else ''} NOT compared)"
+        banner_class = "incomplete"
     when = generated_at or datetime.now(timezone.utc)
     who = generated_by or getpass.getuser()
     return _TEMPLATE.render(
         result=result,
         status=status,
+        banner_class=banner_class,
         generated_at=when.isoformat(timespec="seconds"),
         generated_by=who,
         rowproof_version=rowproof.__version__,

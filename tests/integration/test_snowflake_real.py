@@ -327,3 +327,47 @@ class TestCleanErrorForBadCredentials:
         sf = SnowflakeConnector()
         with pytest.raises(ConnectionFailedError):
             sf.connect(bad_dsn)
+
+
+class TestBooleanVsIntegerAcrossEngines:
+    """BOOL-1 for an integer paired with a boolean (found migrating Pagila
+    to ClickHouse; the Snowflake rendering is separate SQL, so it needs its
+    own real-server proof)."""
+
+    def _sf_table(self, sf_schema, ddl, rows):
+        sf = _sf_conn()
+        try:
+            sf.query(f'CREATE TABLE "{_sf_dsn().database}"."{sf_schema}"."b" ("id" NUMBER(38,0), "v" {ddl})')
+            sf.query(f'INSERT INTO "{_sf_dsn().database}"."{sf_schema}"."b" VALUES {rows}')
+        finally:
+            sf.close()
+
+    def test_postgres_boolean_vs_snowflake_number_matches(self, pg_database, sf_schema):
+        from .conftest import exec_sql
+
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, v boolean)")
+        exec_sql(pg_database, "INSERT INTO a VALUES (1, true), (2, false), (3, NULL)")
+        self._sf_table(sf_schema, "NUMBER(38,0)", "(1, 1), (2, 0), (3, NULL)")
+        result = _diff(pg_database, sf_schema)
+        assert result.excluded_columns == []
+        assert result.is_match, result.row_diffs
+
+    def test_snowflake_number_other_than_0_or_1_is_a_difference(self, pg_database, sf_schema):
+        from .conftest import exec_sql
+
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, v boolean)")
+        exec_sql(pg_database, "INSERT INTO a VALUES (1, true), (2, true)")
+        self._sf_table(sf_schema, "NUMBER(38,0)", "(1, 1), (2, 2)")
+        result = _diff(pg_database, sf_schema)
+        assert not result.is_match
+        assert [rd.key[0] for rd in result.row_diffs] == [2]
+
+    def test_postgres_integer_vs_snowflake_boolean_matches(self, pg_database, sf_schema):
+        from .conftest import exec_sql
+
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, v integer)")
+        exec_sql(pg_database, "INSERT INTO a VALUES (1, 1), (2, 0)")
+        self._sf_table(sf_schema, "BOOLEAN", "(1, true), (2, false)")
+        result = _diff(pg_database, sf_schema)
+        assert result.excluded_columns == []
+        assert result.is_match, result.row_diffs

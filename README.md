@@ -56,6 +56,7 @@ public.orders  postgres:postgres/public.orders  ->  clickhouse:default/orders
 ## What it checks — and what it never does
 
 - Verifies every row matches: counts, missing rows, extra rows, and changed values, down to the specific column and the exact rule that governed the comparison (a timestamp precision mismatch and a NULL-vs-empty-string mismatch are not the same bug, and rowproof tells you which one you have).
+- **Tells you what it did not check.** If a column can't be compared (for example a type that changed in the migration, or a column on only one side), the result reads `MATCH (PARTIAL: N columns NOT compared)` and names them, in the terminal, the HTML report and the JSON. A plain `MATCH` means every column was compared.
 - **Never writes to your database.** Every connector is read-only by construction — `SELECT` and schema-introspection queries only, nothing else. It works with a read-only database role.
 - **Zero telemetry.** Nothing phones home. Read the source; there's no network call in this codebase that isn't the one you told it to make.
 
@@ -91,7 +92,7 @@ Every cross-engine type difference is governed by one of these published rules, 
 | FLT-1 | float / double | scientific notation, 15 significant digits by default | `--float-precision N` overrides |
 | STR-1 | text | as-is, UTF-8 | No trimming, no case folding by default |
 | STR-2 | text, opt-in | `--trim` / `--case-insensitive` | Cited in output when active |
-| BOOL-1 | boolean | `true` / `false` | Handles integer 0/1 vs boolean across engines |
+| BOOL-1 | boolean | `true` / `false` | An integer paired with a boolean (e.g. ClickHouse `UInt8`) is compared as `true`/`false` when it is exactly 1/0; any other number is reported as a difference |
 | TS-1 | timestamp with tz | ISO 8601 UTC, `YYYY-MM-DDTHH:MM:SS.ffffffZ` | Always 6 fractional digits |
 | TS-2 | timestamp precision differs | rounded to the pair's lower precision | e.g. Postgres µs vs ClickHouse `DateTime` (seconds) |
 | TS-3 | timestamp without tz | rendered as-is with `Z`, assumed UTC, warns once | Always UTC for now; `--assume-tz` other than UTC is rejected (not implemented yet) |
@@ -101,7 +102,7 @@ Every cross-engine type difference is governed by one of these published rules, 
 | BIN-1 | bytea / binary | lower-case hex | |
 | JSON-1 | json / jsonb | text after engine-side canonicalisation if available | Full key-order-independent compare is a future release |
 | ARR-1 | arrays | `[` + elements joined by `,` + `]` | Order-sensitive |
-| ENUM-1 | enums | the label as text | |
+| ENUM-1 | enums | the label as text | Compared directly against a text column (enums usually become strings in a migration) |
 | UNK-1 | anything unmapped | cast to text, warns once, cites the rule | Never fails a run over an unknown type |
 
 ## How it works

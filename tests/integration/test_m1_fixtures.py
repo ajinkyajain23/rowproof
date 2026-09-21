@@ -292,25 +292,66 @@ class TestBooleanFixtures:
         exec_sql(pg_database, "INSERT INTO t (v) VALUES (true), (false)")
         assert render(pg_database, "t") == ["true", "false"]
 
-    def test_boolean_vs_integer_0_1_is_excluded_as_incompatible_not_silently_mapped(self, pg_database):
-        # spec §6.1's Notes column says boolean-vs-int should "map, cite
-        # rule" — that's a cross-representation coercion (relevant once a
-        # second engine, e.g. ClickHouse's UInt8-as-bool, is in play from
-        # M2 on). Coercing *any* Postgres integer column into "maybe a
-        # boolean" within a single engine is a real footgun (it would
-        # silently start treating unrelated int columns as compatible
-        # with boolean ones), so M1 deliberately does NOT guess: a
-        # boolean column paired with an integer column is reported as an
-        # incompatible-family exclusion rather than silently mapped. This
-        # is a documented scope limit, not an oversight.
+    def test_boolean_vs_integer_0_1_is_compared_as_bool_1(self, pg_database):
+        # spec §6.1 (BOOL-1): "Integers 0/1 in one engine vs boolean in the
+        # other: map, cite rule". This used to be excluded as incompatible
+        # (a deliberate M1 scope limit while only Postgres existed); a real
+        # Postgres -> ClickHouse migration (ClickHouse's importer turns
+        # `boolean` into UInt8) showed that leaves ordinary boolean columns
+        # silently unverified. Only an integer paired with a boolean gets
+        # this treatment, and any value other than 0/1 renders as itself,
+        # so it can never be mistaken for `true`.
         exec_sql(pg_database, "CREATE TABLE s (id bigint PRIMARY KEY, v boolean)")
         exec_sql(pg_database, "CREATE TABLE t (id bigint PRIMARY KEY, v integer)")
-        src, tgt = connector_for(pg_database), connector_for(pg_database)
-        src_cols = {c.name: c for c in src.get_schema(table_ref("db", "s"))}
-        tgt_cols = {c.name: c for c in tgt.get_schema(table_ref("db", "t"))}
-        m = match_columns(src_cols, tgt_cols, ["v"])
-        assert m.matched == []
-        assert m.excluded == ["v"]
+        exec_sql(pg_database, "INSERT INTO s VALUES (1, true), (2, false), (3, NULL)")
+        exec_sql(pg_database, "INSERT INTO t VALUES (1, 1), (2, 0), (3, NULL)")
+        result = diff(
+            connector_for(pg_database), connector_for(pg_database),
+            table_ref("db", "s"), table_ref("db", "t"), key_columns=["id"],
+        )
+        assert result.excluded_columns == []
+        assert result.is_match, result.row_diffs
+
+    def test_integer_other_than_0_or_1_is_a_difference_not_silently_true(self, pg_database):
+        exec_sql(pg_database, "CREATE TABLE s (id bigint PRIMARY KEY, v boolean)")
+        exec_sql(pg_database, "CREATE TABLE t (id bigint PRIMARY KEY, v integer)")
+        exec_sql(pg_database, "INSERT INTO s VALUES (1, true), (2, true), (3, false)")
+        exec_sql(pg_database, "INSERT INTO t VALUES (1, 1), (2, 2), (3, 1)")  # 2 is not a boolean; 1 vs false differs
+        result = diff(
+            connector_for(pg_database), connector_for(pg_database),
+            table_ref("db", "s"), table_ref("db", "t"), key_columns=["id"],
+        )
+        assert not result.is_match
+        assert {rd.key[0] for rd in result.row_diffs} == {2, 3}
+        assert all(rd.changes["v"][2] is NormalisationRule.BOOL_1 for rd in result.row_diffs)
+
+
+class TestEnumVsTextFixtures:
+    def test_enum_column_is_compared_against_a_text_column(self, pg_database):
+        exec_sql(pg_database, "CREATE TYPE mood AS ENUM ('happy', 'sad')")
+        exec_sql(pg_database, "CREATE TABLE s (id bigint PRIMARY KEY, v mood)")
+        exec_sql(pg_database, "CREATE TABLE t (id bigint PRIMARY KEY, v text)")
+        exec_sql(pg_database, "INSERT INTO s VALUES (1, 'happy'), (2, 'sad')")
+        exec_sql(pg_database, "INSERT INTO t VALUES (1, 'happy'), (2, 'sad')")
+        result = diff(
+            connector_for(pg_database), connector_for(pg_database),
+            table_ref("db", "s"), table_ref("db", "t"), key_columns=["id"],
+        )
+        assert result.excluded_columns == []
+        assert result.is_match, result.row_diffs
+
+    def test_a_changed_enum_label_is_reported(self, pg_database):
+        exec_sql(pg_database, "CREATE TYPE mood AS ENUM ('happy', 'sad')")
+        exec_sql(pg_database, "CREATE TABLE s (id bigint PRIMARY KEY, v mood)")
+        exec_sql(pg_database, "CREATE TABLE t (id bigint PRIMARY KEY, v text)")
+        exec_sql(pg_database, "INSERT INTO s VALUES (1, 'happy')")
+        exec_sql(pg_database, "INSERT INTO t VALUES (1, 'sad')")
+        result = diff(
+            connector_for(pg_database), connector_for(pg_database),
+            table_ref("db", "s"), table_ref("db", "t"), key_columns=["id"],
+        )
+        assert not result.is_match
+        assert result.row_diffs[0].changes["v"][:2] == ("happy", "sad")
 
 
 class TestUuidFixtures:

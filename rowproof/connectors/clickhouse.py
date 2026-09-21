@@ -231,7 +231,17 @@ class ClickHouseConnector:
             # currently routes here (see _resolve()).
             inner = f"toString({quoted})"
         elif rule is NormalisationRule.BOOL_1:
-            inner = f"(CASE WHEN {quoted} THEN 'true' ELSE 'false' END)"
+            if column.native_type.lower() in ("boolean", "bool"):
+                inner = f"(CASE WHEN {quoted} THEN 'true' ELSE 'false' END)"
+            else:
+                # An integer (e.g. the UInt8 ClickHouse's own Postgres
+                # importer creates for a boolean) paired with a boolean:
+                # exactly 1/0 -> true/false, anything else stays its own
+                # number so it can't be mistaken for `true`.
+                inner = (
+                    f"(CASE WHEN {quoted} = 1 THEN 'true' WHEN {quoted} = 0 THEN 'false' "
+                    f"ELSE toString({quoted}) END)"
+                )
         elif rule is NormalisationRule.UUID_1:
             inner = f"toString({quoted})"
         elif rule is NormalisationRule.BIN_1:

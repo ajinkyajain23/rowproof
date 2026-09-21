@@ -67,6 +67,12 @@ def render_terminal(result: DiffResult) -> str:
 
     lines.append("")
     verdict = "MATCH" if result.is_match else "DIFFERENT"
+    if result.is_match and not result.fully_compared:
+        # A bare "MATCH" here would read as a clean pass while some
+        # columns were never compared -- for a tool that exists to give
+        # proof, the headline has to say so. Exit code is unchanged.
+        n = len(result.excluded_columns)
+        verdict = f"MATCH (PARTIAL: {n} column{'s' if n != 1 else ''} NOT compared)"
     lines.append(f"  result   {verdict}   exit {result.exit_code()}")
     return "\n".join(lines)
 
@@ -112,6 +118,7 @@ def render_json(
         "is_match": result.is_match,
         "exit_code": result.exit_code(),
         "excluded_columns": list(result.excluded_columns),
+        "fully_compared": result.fully_compared,
         "segments_examined": result.segments_examined,
         "queries_per_side": result.queries_per_side,
         "timings": {"total_seconds": round(result.elapsed_seconds, 3)},

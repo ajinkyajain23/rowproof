@@ -167,3 +167,60 @@ def test_no_str_2_promotion_by_default():
     tgt = {"name": col("name", "text")}
     m = match_columns(src, tgt, ["name"])
     assert "name" not in m.rule_overrides
+
+
+# --- real-world migration gaps found by migrating Pagila Postgres -> ClickHouse ---
+
+def test_boolean_vs_integer_is_compared_as_bool_1_not_excluded():
+    # ClickHouse's own Postgres importer turns `boolean` into UInt8, so a
+    # boolean column paired with an integer column is the normal shape of a
+    # real migration. spec §6.1 (BOOL-1): "Integers 0/1 in one engine vs
+    # boolean in the other: map, cite rule".
+    src = {"active": col("active", "boolean")}
+    tgt = {"active": col("active", "bigint")}
+    m = match_columns(src, tgt, ["active"])
+    assert m.matched == ["active"]
+    assert m.excluded == []
+    assert m.rule_overrides["active"] is NormalisationRule.BOOL_1
+
+
+def test_integer_vs_boolean_is_symmetric():
+    src = {"active": col("active", "bigint")}
+    tgt = {"active": col("active", "boolean")}
+    m = match_columns(src, tgt, ["active"])
+    assert m.matched == ["active"]
+    assert m.rule_overrides["active"] is NormalisationRule.BOOL_1
+
+
+def test_boolean_vs_decimal_or_float_is_still_excluded():
+    # Only an *integer* can plausibly stand in for a boolean; a decimal or
+    # float column paired with a boolean is a genuine type mismatch.
+    for other in ("numeric(10,2)", "double precision"):
+        src = {"v": col("v", "boolean")}
+        tgt = {"v": col("v", other, scale=2)}
+        m = match_columns(src, tgt, ["v"])
+        assert m.matched == [] and m.excluded == ["v"], other
+
+
+def test_integer_vs_integer_gets_no_bool_override():
+    src = {"n": col("n", "bigint")}
+    tgt = {"n": col("n", "integer")}
+    m = match_columns(src, tgt, ["n"])
+    assert "n" not in m.rule_overrides
+
+
+def test_enum_vs_text_is_compatible():
+    # Enums migrate to plain strings in most engines (ClickHouse's importer
+    # does exactly that). spec §6.1 (ENUM-1): "the label as text".
+    for a, b in (("enum", "text"), ("text", "enum")):
+        src = {"rating": col("rating", a)}
+        tgt = {"rating": col("rating", b)}
+        m = match_columns(src, tgt, ["rating"])
+        assert m.matched == ["rating"] and m.excluded == [], (a, b)
+
+
+def test_enum_vs_integer_is_still_excluded():
+    src = {"rating": col("rating", "enum")}
+    tgt = {"rating": col("rating", "bigint")}
+    m = match_columns(src, tgt, ["rating"])
+    assert m.matched == [] and m.excluded == ["rating"]
