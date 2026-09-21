@@ -13,7 +13,13 @@ import uuid
 
 import pytest
 
-from rowproof.core.errors import NonUniqueKeyError, NoPrimaryKeyError
+from rowproof.core.errors import (
+    KeyColumnNotFoundError,
+    NonUniqueKeyError,
+    NoPrimaryKeyError,
+    RowProofError,
+    TableNotFoundError,
+)
 from rowproof.core.hashdiff import diff
 from rowproof.core.models import Column, TableRef
 
@@ -385,3 +391,48 @@ class TestSampling:
         assert not result.is_match
         assert result.changed > 0
         assert result.changed == result.source_count
+
+
+class _EmptySchemaConnector(FakeConnector):
+    """What every real connector does for a table that doesn't exist:
+    information_schema / system.columns simply return zero rows."""
+
+    def get_schema(self, table):
+        return []
+
+    def get_primary_key(self, table):
+        return None
+
+
+class TestMissingTableAndBadKeyColumn:
+    """spec §10: "Clean error for: ... missing table, no key" -- a
+    one-line message naming the problem, never a bare `error: 'id'` (a
+    Python KeyError leaking through)."""
+
+    def test_missing_table_raises_a_clear_error_naming_the_table(self):
+        missing = _EmptySchemaConnector()
+        missing.connect(":memory:")
+        src, _, ref = make_pair(base_rows(3), base_rows(3), INT_COLS)
+        with pytest.raises(TableNotFoundError) as exc_info:
+            diff(missing, src, ref, ref, key_columns=["id"])
+        assert "t" in str(exc_info.value)
+        assert "not found" in str(exc_info.value).lower()
+        assert isinstance(exc_info.value, RowProofError)
+
+    def test_key_column_that_does_not_exist_lists_the_real_columns(self):
+        src, tgt, ref = make_pair(base_rows(3), base_rows(3), INT_COLS)
+        with pytest.raises(KeyColumnNotFoundError) as exc_info:
+            diff(src, tgt, ref, ref, key_columns=["nosuchcolumn"])
+        message = str(exc_info.value)
+        assert "nosuchcolumn" in message
+        assert "id" in message and "name" in message  # what IS available
+
+    def test_key_column_differing_only_by_case_suggests_the_real_spelling(self):
+        # e.g. Snowflake reports unquoted columns upper-case, so `--key id`
+        # against a column stored as ID should say so, not just "not found".
+        upper = [Column("ID", "bigint", nullable=False, ordinal=1)]
+        src, tgt, ref = make_pair([{"ID": 1}], [{"ID": 1}], upper, primary_key=("ID",))
+        with pytest.raises(KeyColumnNotFoundError) as exc_info:
+            diff(src, tgt, ref, ref, key_columns=["id"])
+        assert "ID" in str(exc_info.value)
+        assert "case" in str(exc_info.value).lower()

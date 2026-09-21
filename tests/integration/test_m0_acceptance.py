@@ -543,6 +543,31 @@ class TestNoPrimaryKeyExitsTwo:
         assert "primary key" in captured.err.lower() or "--key" in captured.err
 
 
+class TestMissingTableAndBadKeyColumnExitTwo:
+    def test_missing_table_exits_2_with_a_clear_message_not_a_bare_key_error(self, pg_database, capsys):
+        exec_sql(pg_database, "CREATE TABLE b (id bigint PRIMARY KEY, name text)")
+
+        code = cli_main(["diff", f"{pg_database}/nosuchtable", f"{pg_database}/b", "--key", "id"])
+        err = capsys.readouterr().err
+
+        assert code == 2
+        assert "nosuchtable" in err
+        assert "not found" in err.lower()
+        assert err.strip() != "error: 'id'"
+
+    def test_key_column_that_does_not_exist_exits_2_and_lists_real_columns(self, pg_database, capsys):
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, name text)")
+        exec_sql(pg_database, "CREATE TABLE b (id bigint PRIMARY KEY, name text)")
+
+        code = cli_main(["diff", f"{pg_database}/a", f"{pg_database}/b", "--key", "nosuchcolumn"])
+        err = capsys.readouterr().err
+
+        assert code == 2
+        assert "nosuchcolumn" in err
+        assert "id" in err and "name" in err
+        assert "Traceback" not in err
+
+
 class TestNonUniqueKeyExitsTwo:
     def test_non_unique_key_exits_2_and_shows_duplicate_example(self, pg_database, capsys):
         exec_sql(pg_database, "CREATE TABLE a (email text, name text)")

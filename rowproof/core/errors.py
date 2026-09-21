@@ -20,6 +20,32 @@ class NoPrimaryKeyError(RowProofError):
         self.table_name = table_name
 
 
+class TableNotFoundError(RowProofError):
+    def __init__(self, table_name: str):
+        super().__init__(
+            f"Table '{table_name}' not found, or it has no visible columns "
+            "(check the name, the schema, and that this login can read it)."
+        )
+        self.table_name = table_name
+
+
+class KeyColumnNotFoundError(RowProofError):
+    def __init__(self, table_name: str, column: str, available: list[str]):
+        hint = ""
+        by_lower = {c.lower(): c for c in available}
+        if column.lower() in by_lower and by_lower[column.lower()] != column:
+            hint = (
+                f" Did you mean '{by_lower[column.lower()]}'? Column names are "
+                "case-sensitive here (Snowflake stores unquoted names in upper case)."
+            )
+        super().__init__(
+            f"Key column '{column}' not found in '{table_name}'.{hint} "
+            f"Available columns: {', '.join(available)}."
+        )
+        self.table_name = table_name
+        self.column = column
+
+
 class NonUniqueKeyError(RowProofError):
     def __init__(self, table_name: str, key_columns: list[str], duplicate_example: tuple):
         example = ", ".join(f"{c}={v!r}" for c, v in zip(key_columns, duplicate_example))

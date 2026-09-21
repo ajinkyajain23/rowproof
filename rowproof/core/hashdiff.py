@@ -19,7 +19,12 @@ from dataclasses import dataclass
 
 from rowproof.connectors.base import Connector
 from rowproof.core.column_matching import match_columns
-from rowproof.core.errors import NonUniqueKeyError, NoPrimaryKeyError
+from rowproof.core.errors import (
+    KeyColumnNotFoundError,
+    NonUniqueKeyError,
+    NoPrimaryKeyError,
+    TableNotFoundError,
+)
 from rowproof.core.models import (
     Algorithm,
     Column,
@@ -105,7 +110,12 @@ def _build_plan(
     where: str | None = None,
 ) -> _Plan:
     cols_by_name = _resolve_columns(connector, table)
+    if not cols_by_name:
+        raise TableNotFoundError(table.qualified_name)
     resolved_key = _resolve_key_columns(connector, table, key_columns)
+    for key_col in resolved_key:
+        if key_col not in cols_by_name:
+            raise KeyColumnNotFoundError(table.qualified_name, key_col, list(cols_by_name))
 
     if columns:
         selected = list(columns)
