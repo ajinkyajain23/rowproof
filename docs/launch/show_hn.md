@@ -12,7 +12,7 @@ It uses the same hash-and-bisect idea as [reladiff](https://github.com/erezsh/re
 
 Benchmark: 100M rows, verified correct, 127 MB peak client memory, 8.95 minutes on a laptop with both databases sharing the same 8 vCPUs.
 
-Link: [github.com/&lt;org&gt;/rowproof — fill in before posting]
+Link: https://github.com/ajinkyajain23/rowproof
 
 ---
 

@@ -15,6 +15,12 @@ dependencies = [
     "clickhouse-connect>=0.7",
 ]
 
+[project.urls]
+Homepage = "https://github.com/ajinkyajain23/rowproof"
+Documentation = "https://github.com/ajinkyajain23/rowproof/blob/main/docs/USAGE.md"
+Source = "https://github.com/ajinkyajain23/rowproof"
+Issues = "https://github.com/ajinkyajain23/rowproof/issues"
+
 [project.optional-dependencies]
 snowflake = ["snowflake-connector-python>=3.6"]
 dev = [
