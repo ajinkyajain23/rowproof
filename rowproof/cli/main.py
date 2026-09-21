@@ -135,23 +135,26 @@ def _parse_column_map(value: str | None) -> dict | None:
     return result or None
 
 
+def _hook_sql_log(connector, sql_log: list[str] | None) -> None:
+    """spec §8.2: JSON output carries every generated SQL statement too —
+    reuse the exact same on_query hook --verbose already installs
+    (chaining onto it, so --verbose logging to stderr keeps working
+    unchanged) rather than a second SQL-capturing mechanism. `list.append`
+    is atomic in CPython, so pooled worker threads can share one log.
+    """
+    if sql_log is None or not hasattr(connector, "on_query"):
+        return
+    previous = connector.on_query
+    connector.on_query = lambda sql, _prev=previous: (_prev(sql) if _prev else None, sql_log.append(sql))
+
+
 def _connect_pair(args, sql_log: list[str] | None = None):
     src_spec = parse_source_spec(args.source)
     tgt_spec = parse_source_spec(args.target)
     source = _make_connector(src_spec.engine, args.verbose)
     target = _make_connector(tgt_spec.engine, args.verbose)
-    if sql_log is not None:
-        for connector in (source, target):
-            if hasattr(connector, "on_query"):
-                previous = connector.on_query
-                # spec §8.2: JSON output carries every generated SQL
-                # statement too — reuse the exact same on_query hook
-                # --verbose already installs (chaining onto it, so
-                # --verbose logging to stderr keeps working unchanged)
-                # rather than a second SQL-capturing mechanism.
-                connector.on_query = (
-                    lambda sql, _prev=previous: (_prev(sql) if _prev else None, sql_log.append(sql))
-                )
+    _hook_sql_log(source, sql_log)
+    _hook_sql_log(target, sql_log)
     _connect_with_retry(source, src_spec.connect_dsn)
     _connect_with_retry(target, tgt_spec.connect_dsn)
 
@@ -168,6 +171,12 @@ def _connect_pair(args, sql_log: list[str] | None = None):
     if threads > 1:
         source_pool = [_make_connector(src_spec.engine, args.verbose) for _ in range(threads)]
         target_pool = [_make_connector(tgt_spec.engine, args.verbose) for _ in range(threads)]
+        # The pooled connectors run the per-segment hash queries -- the
+        # actual proof of a match -- so they must feed the same SQL log as
+        # the main connectors, or the JSON/HTML "Reproduce" output would
+        # silently omit exactly the queries a reviewer wants to re-run.
+        for connector in (*source_pool, *target_pool):
+            _hook_sql_log(connector, sql_log)
         for connector in source_pool:
             _connect_with_retry(connector, src_spec.connect_dsn)
         for connector in target_pool:

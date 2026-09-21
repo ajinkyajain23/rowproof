@@ -171,3 +171,32 @@ class TestJsonOutputM1Fields:
         assert payload["timings"]["total_seconds"] >= 0
         assert len(payload["sql_statements"]) > 0
         assert any("SELECT" in s for s in payload["sql_statements"])
+
+    def test_json_sql_statements_include_every_segment_hash_query_at_default_threads(
+        self, pg_database, capsys
+    ):
+        # Regression: with the default --threads 4, the per-segment hash
+        # queries run on extra pooled connections that were never hooked
+        # into the SQL log, so the JSON (and the HTML "Reproduce" section,
+        # which shares the same log) listed only the setup queries -- not
+        # the hash queries that actually prove the match. spec §8.2/§8.3:
+        # "every generated SQL statement".
+        exec_sql(pg_database, "CREATE TABLE a (id bigint PRIMARY KEY, name text)")
+        exec_sql(pg_database, "INSERT INTO a SELECT g, 'row-' || g FROM generate_series(1, 5000) g")
+        exec_sql(pg_database, "CREATE TABLE b (LIKE a INCLUDING ALL)")
+        exec_sql(pg_database, "INSERT INTO b SELECT * FROM a")
+
+        argv = [
+            "diff", f"{pg_database}/a", f"{pg_database}/b",
+            "--key", "id", "--algorithm", "hashdiff", "--output", "json",
+        ]
+        code = cli_main(argv)
+        payload = json.loads(capsys.readouterr().out)
+
+        assert code == 0
+        hash_queries = [s for s in payload["sql_statements"] if "md5" in s.lower()]
+        # identical tables never bisect: exactly one hash query per segment, per side
+        assert len(hash_queries) == 2 * payload["queries_per_side"], (
+            f"expected {2 * payload['queries_per_side']} hash queries recorded, "
+            f"got {len(hash_queries)}"
+        )
