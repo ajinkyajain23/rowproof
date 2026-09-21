@@ -65,6 +65,18 @@ public.orders  postgres:postgres/public.orders  ->  clickhouse:default/orders
 | ClickHouse | `clickhouse-connect` | |
 | Snowflake | `snowflake-connector-python` | Optional extra: `rowproof[snowflake]` |
 
+### Snowflake: known limitations
+
+Snowflake support works, but it is the least battle-tested of the three engines. It has been tested against a single trial account with small tables; Postgres and ClickHouse have had far more. Know these before you rely on it:
+
+- **Login is username and password only.** The connection string has no place for a warehouse, role, SSO, MFA, or key-pair login. Accounts that require SSO or key-pair authentication won't work yet, and queries run on the user's *default* warehouse (a user with none set will fail).
+- **Column names are case-sensitive.** Snowflake stores unquoted names in upper case, so `--key id` won't match a column stored as `ID`. Pass `--key ID`, or create the table with quoted lower-case names. The error message tells you when this is the problem.
+- **Primary keys are often not declared** on Snowflake tables (Snowflake doesn't enforce them). If auto-detection finds none, pass `--key`.
+- **JSON columns are compared as plain text.** `VARIANT`, `ARRAY` and `OBJECT` use rule UNK-1: two JSON values that mean the same thing but are formatted differently will show as different, and a JSON `null` is not distinguished from an SQL `NULL`.
+- **Special characters in passwords must be percent-encoded** in the connection string (`@` becomes `%40`).
+- **It uses your warehouse's credits.** Every query runs on your Snowflake warehouse. Start with a small table or `--sample`.
+- **No Snowflake benchmark yet.** The 100M-row benchmark below is Postgres to ClickHouse only.
+
 ## Supported types (canonical comparison rules)
 
 Every cross-engine type difference is governed by one of these published rules, and every difference rowproof reports cites the rule ID that applied — never a vague "values differ."
