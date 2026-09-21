@@ -497,8 +497,9 @@ def _append_run_level_warnings(plan: _Plan, result: DiffResult) -> None:
     if naive_cols:
         result.warnings.append(
             TdWarning(
-                "TS-3: naive timestamp column(s) assumed "
-                f"{plan.options.assume_tz} ({', '.join(naive_cols)}) — use --assume-tz to override",
+                "TS-3: naive timestamp column(s) compared as UTC "
+                f"({', '.join(naive_cols)}) — if they are really in another zone, "
+                "use timestamp-with-timezone columns or convert them in a view",
                 rule=NormalisationRule.TS_3,
             )
         )

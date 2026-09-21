@@ -3,7 +3,7 @@ driver.
 
 `ClickHouseConnector` in clickhouse.py calls only the functions below,
 never clickhouse_connect directly. This module used to be a hand-rolled
-stdlib `urllib` HTTP client (see git history / docs/DEV_ENVIRONMENT.md
+stdlib `urllib` HTTP client (see git history / docs/internal/DEV_ENVIRONMENT.md
 for why); clickhouse-connect replaces that with the real driver, which
 speaks the same HTTP interface but also handles response decoding,
 per-engine type mapping, and connection re-use itself instead of this

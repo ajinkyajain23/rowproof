@@ -3,7 +3,7 @@
 `PostgresConnector` in postgres.py calls only the functions below, never
 psycopg directly, so the rest of the codebase is insulated from driver
 specifics. This module used to shell out to the `psql` CLI binary (see
-git history / docs/DEV_ENVIRONMENT.md for why); psycopg replaces that
+git history / docs/internal/DEV_ENVIRONMENT.md for why); psycopg replaces that
 with a real wire-protocol connection and hands back already-typed Python
 values (int, Decimal, datetime, bool, ...) instead of text that has to be
 guessed back into a type.

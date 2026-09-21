@@ -1,4 +1,4 @@
-"""rowproof CLI — argparse stand-in for `typer` (see docs/DEV_ENVIRONMENT.md).
+"""rowproof CLI — argparse stand-in for `typer` (see docs/internal/DEV_ENVIRONMENT.md).
 Flags, behavior and exit codes follow spec §7 exactly; only the argument
 *parsing library* differs from the spec's chosen stack.
 """
@@ -201,12 +201,29 @@ def resolve_algorithm(requested: str, args) -> str:
     return "hashdiff"
 
 
+def _check_assume_tz(value: str) -> str:
+    """`--assume-tz` is accepted by the parser but no connector applies it:
+    a naive (TS-3) timestamp is always rendered as if it were UTC. Passing
+    another zone used to be silently ignored while the warning still said
+    "assumed <zone>" -- rows that match in that zone were reported
+    DIFFERENT with a message claiming otherwise. Refuse loudly until the
+    conversion is actually implemented in each connector.
+    """
+    if value.strip().upper() != "UTC":
+        raise RowProofError(
+            f"--assume-tz {value} is not supported yet: naive timestamps are always "
+            "compared as UTC. Use timestamp-with-timezone columns, or convert the "
+            "column in a view, so both sides agree on the instant."
+        )
+    return value
+
+
 def _normalise_kwargs(args) -> dict:
     return dict(
         trim=args.trim,
         case_insensitive=args.case_insensitive,
         float_precision=args.float_precision,
-        assume_tz=args.assume_tz,
+        assume_tz=_check_assume_tz(args.assume_tz),
         column_map=_parse_column_map(args.column_map),
     )
 
@@ -237,7 +254,7 @@ def cmd_diff(args) -> int:
                 # while also asking to sample -- a clear error beats
                 # silently ignoring the flag.
                 raise RowProofError(
-                    "--sample/--sample-rows requires hashdiff (spec §4.3) -- "
+                    "--sample/--sample-rows needs the hash-based method -- "
                     "pass --algorithm hashdiff, or diff two different connections "
                     "so hashdiff is auto-selected"
                 )
@@ -391,7 +408,7 @@ def _run_one_job(job, connections: dict, verbose: bool) -> int:
             key_columns=job.key, columns=job.columns, exclude=job.exclude,
             where=job.where, where_source=job.where_source, where_target=job.where_target,
             trim=job.trim, case_insensitive=job.case_insensitive,
-            float_precision=job.float_precision, assume_tz=job.assume_tz, column_map=job.column_map,
+            float_precision=job.float_precision, assume_tz=_check_assume_tz(job.assume_tz), column_map=job.column_map,
         )
         if algorithm == "joindiff":
             result = run_joindiff(

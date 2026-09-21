@@ -3,7 +3,7 @@ real databases before calling a milestone done.").
 
 This dev environment has no Docker daemon, so these tests run against a
 natively-installed local Postgres 16 instead of the spec's chosen
-`testcontainers` (see docs/DEV_ENVIRONMENT.md). Every fixture here is
+`testcontainers` (see docs/internal/DEV_ENVIRONMENT.md). Every fixture here is
 scoped narrowly to "how do I get a Postgres to point at" so that swapping
 in testcontainers later is a fixture-only change — the tests themselves
 only ever see a DSN.

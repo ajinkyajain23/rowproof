@@ -14,9 +14,11 @@ import pytest
 from rowproof.cli.main import (
     _CONNECT_RETRY_ATTEMPTS,
     _connect_with_retry,
+    _normalise_kwargs,
     _report_error,
     build_parser,
 )
+from rowproof.core.errors import RowProofError
 
 
 class _FlakyConnector:
@@ -114,3 +116,26 @@ def test_cli_version_flag_prints_version_and_exits_zero(capsys):
     assert exc_info.value.code == 0
     captured = capsys.readouterr()
     assert "rowproof" in captured.out
+
+
+def _diff_args(*extra):
+    return build_parser().parse_args(["diff", "postgres://h/db/t", "clickhouse://h/db/t", *extra])
+
+
+def test_assume_tz_other_than_utc_is_rejected_not_silently_ignored():
+    # Regression: --assume-tz Asia/Kolkata was accepted, echoed back in the
+    # TS-3 warning ("assumed Asia/Kolkata"), but never applied by any
+    # connector -- naive timestamps were still compared as UTC, so rows that
+    # match in the stated timezone were reported DIFFERENT. Until it's
+    # implemented, refuse loudly rather than claim something untrue.
+    with pytest.raises(RowProofError, match="not supported"):
+        _normalise_kwargs(_diff_args("--assume-tz", "Asia/Kolkata"))
+
+
+@pytest.mark.parametrize("value", ["UTC", "utc", "Utc"])
+def test_assume_tz_utc_is_accepted_in_any_case(value):
+    assert _normalise_kwargs(_diff_args("--assume-tz", value))["assume_tz"].upper() == "UTC"
+
+
+def test_assume_tz_defaults_to_utc():
+    assert _normalise_kwargs(_diff_args())["assume_tz"].upper() == "UTC"

@@ -1,7 +1,7 @@
 """M0 acceptance criteria (spec §13 M0), verified against a real Postgres
 instance per spec's instruction: "Verify on real databases before calling
 a milestone done." Runs against the Postgres 16 container docker-compose.yml
-starts (see docs/LAPTOP_SETUP.md).
+starts (see docs/internal/LAPTOP_SETUP.md).
 
 Each test method's docstring/name is the literal acceptance-criterion
 bullet it proves.
@@ -733,7 +733,7 @@ class TestNetworkDropMidRun:
             )
 
         # This project's dev environment runs Postgres via docker-compose
-        # (docs/LAPTOP_SETUP.md); CI runs it as a plain GitHub Actions
+        # (docs/internal/LAPTOP_SETUP.md); CI runs it as a plain GitHub Actions
         # "service container" (spec'd directly in ci.yml, no compose
         # project at all) -- `docker compose stop/start postgres` only
         # works in the former (confirmed the hard way: CI failed with

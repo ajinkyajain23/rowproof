@@ -7,7 +7,7 @@ calling a milestone done").
 
 *** THIS FILE CANNOT RUN IN THIS DEV ENVIRONMENT. ***
 No Docker daemon, no network access to install a ClickHouse server or
-client (apt/pip both blocked — see docs/DEV_ENVIRONMENT.md's ClickHouse
+client (apt/pip both blocked — see docs/internal/DEV_ENVIRONMENT.md's ClickHouse
 section), no pre-installed binary, and the user's linked desktop hit an
 unrelated Windows-bridge bug when we tried that route too. The tests below
 are written exactly as they should run once a real server is reachable —

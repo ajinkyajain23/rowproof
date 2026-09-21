@@ -1,5 +1,5 @@
 """Terminal + JSON rendering — plain-text stand-in for `rich` (see
-docs/DEV_ENVIRONMENT.md). Behavior/content matches spec §8; only the
+docs/internal/DEV_ENVIRONMENT.md). Behavior/content matches spec §8; only the
 "tables and progress bars" styling is simplified.
 """
 

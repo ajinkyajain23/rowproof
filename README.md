@@ -51,6 +51,8 @@ public.orders  postgres:postgres/public.orders  ->  clickhouse:default/orders
   result   DIFFERENT   exit 1
 ```
 
+**Next:** the [user guide](docs/USAGE.md) covers connection strings for each database, every option with examples, checking many tables from a config file, using rowproof in CI, and troubleshooting.
+
 ## What it checks — and what it never does
 
 - Verifies every row matches: counts, missing rows, extra rows, and changed values, down to the specific column and the exact rule that governed the comparison (a timestamp precision mismatch and a NULL-vs-empty-string mismatch are not the same bug, and rowproof tells you which one you have).
@@ -92,7 +94,7 @@ Every cross-engine type difference is governed by one of these published rules, 
 | BOOL-1 | boolean | `true` / `false` | Handles integer 0/1 vs boolean across engines |
 | TS-1 | timestamp with tz | ISO 8601 UTC, `YYYY-MM-DDTHH:MM:SS.ffffffZ` | Always 6 fractional digits |
 | TS-2 | timestamp precision differs | rounded to the pair's lower precision | e.g. Postgres µs vs ClickHouse `DateTime` (seconds) |
-| TS-3 | timestamp without tz | rendered as-is with `Z`, assumed UTC, warns once | `--assume-tz` overrides |
+| TS-3 | timestamp without tz | rendered as-is with `Z`, assumed UTC, warns once | Always UTC for now; `--assume-tz` other than UTC is rejected (not implemented yet) |
 | DATE-1 | date | `YYYY-MM-DD` | |
 | TIME-1 | time | `HH:MM:SS.ffffff` | |
 | UUID-1 | uuid | lower-case, hyphenated | Handles a uuid stored as VARCHAR (Snowflake) |

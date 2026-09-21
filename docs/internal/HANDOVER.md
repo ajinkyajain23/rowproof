@@ -31,7 +31,7 @@ still stand-ins for `typer`/`rich` — spec §3's chosen stack, but not
 required by any M2 acceptance criterion, so out of scope for the M2 pass.
 CLI *behaviour* (flags, exit codes, output content) matches spec §7–§8
 exactly regardless; this is a pure rendering-layer swap whenever it's
-picked up. `docs/DEV_ENVIRONMENT.md` has the current, accurate status of
+picked up. `docs/internal/DEV_ENVIRONMENT.md` has the current, accurate status of
 every stand-in.
 
 ## Environment on this machine

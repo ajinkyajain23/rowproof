@@ -7,7 +7,7 @@ databases up, install real drivers, and carry M2 to a genuinely green,
 unskipped suite, not just react to pasted pytest output.
 
 Give Claude Code this whole file as its instruction (e.g. "read
-`docs/CLAUDE_CODE_HANDOFF.md` in this folder and follow it exactly").
+`docs/internal/CLAUDE_CODE_HANDOFF.md` in this folder and follow it exactly").
 
 ## 0. Orientation
 
@@ -20,7 +20,7 @@ non-negotiable rules, most importantly:
 - Connectors are read-only by construction — never write to a user
   database (SPEC §0.5); only test fixtures may create tables.
 - **Real drivers only from M2 onward — no new stand-ins**, however
-  inconvenient. `docs/DEV_ENVIRONMENT.md` explains the two stand-ins this
+  inconvenient. `docs/internal/DEV_ENVIRONMENT.md` explains the two stand-ins this
   project currently has (`_pgwire.py` shells out to `psql`; `_chwire.py` is
   a real stdlib HTTP client that has never been run against a real
   server) and exactly what replacing each one requires.
@@ -109,11 +109,11 @@ this):
 Neither connector's public method signatures should need to change
 (`connect`, `query`, `get_schema`, `get_primary_key`, `normalise_expr`,
 `row_hash_expr`, `aggregate_hash_expr`, `quote_identifier`,
-`quote_literal`) — see `docs/DEV_ENVIRONMENT.md`'s existing swap-out notes
+`quote_literal`) — see `docs/internal/DEV_ENVIRONMENT.md`'s existing swap-out notes
 for the exact contract each must keep. Once both are gone, also point
 `tests/integration/conftest.py` at the Docker databases explicitly (env
 vars with defaults matching `docker-compose.yml`) and delete
-`docs/DEV_ENVIRONMENT.md`'s stand-in table (per `HANDOVER.md`).
+`docs/internal/DEV_ENVIRONMENT.md`'s stand-in table (per `HANDOVER.md`).
 
 ## 6. Finish what M2 is still missing
 
