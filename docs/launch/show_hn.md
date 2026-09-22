@@ -1,6 +1,8 @@
 # Show HN draft
 
-**Title:** Show HN: Rowproof – prove a database migration didn't lose or change a row (Postgres, ClickHouse, Snowflake)
+**Title:** Show HN: Rowproof – prove a database migration didn't lose or change a row
+
+(74 characters — HN caps titles at 80; the full version with "(Postgres, ClickHouse, Snowflake)" was 108 and got rejected. The engines are still in the body and the repo.)
 
 **Body:**
 
